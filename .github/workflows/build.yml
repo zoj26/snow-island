@@ -174,6 +174,7 @@ jobs:
           import android.content.pm.ResolveInfo;
           import android.graphics.Bitmap;
           import android.graphics.Canvas;
+          import android.graphics.Color;
           import android.graphics.LinearGradient;
           import android.graphics.Paint;
           import android.graphics.Path;
@@ -186,6 +187,9 @@ jobs:
           import android.media.AudioAttributes;
           import android.media.MediaPlayer;
           import android.media.SoundPool;
+          import android.media.tv.TvContract;
+          import android.media.tv.TvInputInfo;
+          import android.media.tv.TvInputManager;
           import android.os.Bundle;
           import android.provider.Settings;
           import android.view.InputDevice;
@@ -234,14 +238,14 @@ jobs:
               static final int E_NONE = 0, E_WAVE = 1, E_DANCE = 2, E_THROW = 3, E_SLIDE = 4, E_NAP = 5,
                       E_HOP = 6, E_FLAP = 7, E_LOOK = 8, E_SIT = 9, E_FLINCH = 10;
 
-              static final int SCENE_ISLAND = 0, SCENE_IGLOO = 1;
+              static final int SCENE_ISLAND = 0, SCENE_IGLOO = 1, SCENE_FIRE = 2;
               static final int OV_NONE = 0, OV_WHEEL = 1, OV_LIST = 2;
 
               static final int SEASON_NONE = 0, SEASON_XMAS = 1, SEASON_HALLOWEEN = 2, SEASON_VALENTINE = 3, SEASON_NEWYEAR = 4;
               static final String[] SEASON_PREF_NAMES = {"Auto", "Christmas", "Halloween", "Valentine's", "New Year", "Off"};
 
               // Sound ids
-              static final int S_STEP = 0, S_CHIRP = 1, S_OPEN = 2, S_WHOOSH = 3, S_SPLAT = 4, S_TICK = 5, S_TOGGLE = 6, S_DOOR = 7;
+              static final int S_STEP = 0, S_CHIRP = 1, S_OPEN = 2, S_WHOOSH = 3, S_SPLAT = 4, S_TICK = 5, S_TOGGLE = 6, S_DOOR = 7, S_CRACKLE = 8;
 
               static final int[] SCARVES = {
                       0xffe53935, 0xff1e88e5, 0xff43a047, 0xfffdd835, 0xff8e24aa,
@@ -249,6 +253,8 @@ jobs:
                       0xff7cb342, 0xfff4511e
               };
               static final int PLAYER_SCARF = 0xffff5252;
+              static final int PENGUIN_BLACK = 0xff1b2230;
+              static final String[] CHAT_BITS = {"…", "♪", "♥", "?", "!", "★", "☺", "❄", "ha ha", "!!", "hm?", "♫", "ooh", "…!"};
               static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
 
               static final String[] WHEEL_ICONS = {"👋", "🕺", "❄️", "🐧", "💤", "🙈", "⚙️", "🎵"};
@@ -267,6 +273,18 @@ jobs:
                   float hitT, throwBackT;
                   float blinkT, nextBlink = 2f;
                   boolean placed;
+                  int bodyCol = PENGUIN_BLACK;
+                  AppPeng chatWith;
+                  float chatT, chatDur, speakT;
+                  boolean chatTalking, speaking, arrived;
+                  String bubble;
+              }
+
+              static class Chair {
+                  String key, label, sub;
+                  Intent intent;
+                  float x, y;
+                  int color;
               }
 
               static class Ball {
@@ -338,6 +356,15 @@ jobs:
               Bitmap world, room;
               volatile List<AppPeng> apps = new ArrayList<>();
               volatile List<AppPeng> allApps = new ArrayList<>();
+              volatile List<Chair> chairs = new ArrayList<>();
+              volatile List<Chair> allChairs = new ArrayList<>();
+              Chair sittingChair;
+              float chairT;
+              int crackleStream;
+              float fireHintT;
+              boolean bellyIcons;
+              float[] emberX, emberY, emberPh;
+              Bitmap fireBg;
               final Map<String, AppPeng> byPkg = new HashMap<>();
               float[] waveX, waveY, wavePh;
               float[] flX, flY, flSpd, flR;
@@ -359,7 +386,7 @@ jobs:
 
               // Audio
               SoundPool sounds;
-              final int[] soundIds = new int[8];
+              final int[] soundIds = new int[9];
               MediaPlayer music;
               volatile boolean resumed;
 
@@ -385,6 +412,7 @@ jobs:
                   soundOn = prefs.getBoolean("sound", true);
                   weatherFx = prefs.getBoolean("weatherfx", true);
                   seasonPref = prefs.getInt("season", 0);
+                  bellyIcons = prefs.getBoolean("belly", false);
                   hidden.addAll(prefs.getStringSet("hidden", new HashSet<String>()));
 
                   view = new SurfaceView(this);
@@ -412,12 +440,14 @@ jobs:
                   axX = axY = 0;
                   loadApps();
                   updateMusic();
+                  if (scene == SCENE_FIRE) startCrackle();
               }
 
               @Override
               protected void onPause() {
                   super.onPause();
                   resumed = false;
+                  stopCrackle();
                   if (music != null) {
                       try { if (music.isPlaying()) music.pause(); } catch (Exception ignored) { }
                   }
@@ -523,10 +553,10 @@ jobs:
                   }
                   new Thread(() -> {
                       File dir = getFilesDir();
-                      String[] names = {"step", "chirp", "open", "whoosh", "splat", "tick", "toggle", "door"};
+                      String[] names = {"step", "chirp", "open", "whoosh", "splat", "tick", "toggle", "door", "crackle"};
                       for (int i = 0; i < names.length; i++) {
                           try {
-                              File f = new File(dir, "sfx2_" + names[i] + ".wav");
+                              File f = new File(dir, (i == 8 ? "sfx3_" : "sfx2_") + names[i] + ".wav");
                               if (!f.exists()) {
                                   float[] data;
                                   switch (i) {
@@ -537,7 +567,8 @@ jobs:
                                       case 4: data = Synth.splat(); break;
                                       case 5: data = Synth.tick(); break;
                                       case 6: data = Synth.toggle(); break;
-                                      default: data = Synth.door(); break;
+                                      case 7: data = Synth.door(); break;
+                                      default: data = Synth.crackle(); break;
                                   }
                                   Synth.writeWav(f, data);
                               }
@@ -571,6 +602,22 @@ jobs:
               void play(int id, float vol, float rate) {
                   if (!soundOn || sounds == null || soundIds[id] == 0) return;
                   try { sounds.play(soundIds[id], vol, vol, 1, 0, rate); } catch (Exception ignored) { }
+              }
+
+              void startCrackle() {
+                  stopCrackle();
+                  if (soundOn && sounds != null && soundIds[S_CRACKLE] != 0) {
+                      try { crackleStream = sounds.play(soundIds[S_CRACKLE], 0.85f, 0.85f, 1, -1, 1f); } catch (Exception ignored) { }
+                  }
+                  runOnUiThread(() -> { try { if (music != null) music.setVolume(0.1f, 0.1f); } catch (Exception ignored) { } });
+              }
+
+              void stopCrackle() {
+                  if (crackleStream != 0 && sounds != null) {
+                      try { sounds.stop(crackleStream); } catch (Exception ignored) { }
+                  }
+                  crackleStream = 0;
+                  runOnUiThread(() -> { try { if (music != null) music.setVolume(0.32f, 0.32f); } catch (Exception ignored) { } });
               }
 
               void updateMusic() {
@@ -631,13 +678,16 @@ jobs:
                               try { a.icon = toBitmap(ri.loadIcon(pm), 72); } catch (Exception ex) { a.icon = null; }
                               a.launches = prefs.getInt("n_" + pk, 0);
                               a.scarf = SCARVES[(pk.hashCode() & 0x7fffffff) % SCARVES.length];
+                              a.bodyCol = a.icon != null ? iconColor(a.icon) : PENGUIN_BLACK;
                               found.put(pk, a);
                           }
                       }
                       List<AppPeng> all = new ArrayList<>(found.values());
                       Collections.sort(all, (a, b) -> a.label.compareToIgnoreCase(b.label));
+                      List<Chair> ch = loadInputs();
                       synchronized (lock) {
                           allApps = all;
+                          allChairs = ch;
                           relayout();
                       }
                   }, "island-apps").start();
@@ -649,7 +699,7 @@ jobs:
                   for (AppPeng a : allApps) if (!hidden.contains(a.pkg)) vis.add(a);
                   Collections.sort(vis, (a, b) -> a.launches != b.launches
                           ? Integer.compare(b.launches, a.launches) : a.label.compareToIgnoreCase(b.label));
-                  float[] ring = {0.30f, 0.50f, 0.68f, 0.82f};
+                  float[] ring = {0.36f, 0.55f, 0.71f, 0.84f};
                   int[] cap = {6, 10, 14, 1000};
                   int idx = 0, n = vis.size();
                   Random r = new Random(42);
@@ -676,8 +726,80 @@ jobs:
                       }
                   }
                   byPkg.clear();
-                  for (AppPeng a : allApps) byPkg.put(a.pkg, a);
+                  for (AppPeng a : allApps) {
+                      byPkg.put(a.pkg, a);
+                      a.chatWith = null; a.chatTalking = false; a.speaking = false; a.arrived = false; a.bubble = null;
+                  }
                   apps = vis;
+
+                  // HDMI chairs in a half circle around the front of the igloo
+                  List<Chair> vc = new ArrayList<>();
+                  for (Chair c : allChairs) if (!hidden.contains(c.key)) vc.add(c);
+                  double[] angs = {28, 58, 122, 152, 5, 175};
+                  List<Chair> placedChairs = new ArrayList<>();
+                  for (int i = 0; i < vc.size() && i < angs.length; i++) {
+                      Chair c = vc.get(i);
+                      double a = Math.toRadians(angs[i]);
+                      c.x = IGLOO_X + (float) Math.cos(a) * 228;
+                      c.y = IGLOO_Y - 5 + (float) Math.sin(a) * 128;
+                      placedChairs.add(c);
+                  }
+                  chairs = placedChairs;
+              }
+
+              List<Chair> loadInputs() {
+                  List<Chair> out = new ArrayList<>();
+                  try {
+                      TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
+                      if (tim == null) return out;
+                      List<TvInputInfo> all = tim.getTvInputList();
+                      for (TvInputInfo info : all) {
+                          if (info.getType() != TvInputInfo.TYPE_HDMI || info.getParentId() != null) continue;
+                          try { if (info.isHidden(this)) continue; } catch (Exception ignored) { }
+                          Chair c = new Chair();
+                          c.key = "input:" + info.getId();
+                          CharSequence cl = null;
+                          try { cl = info.loadCustomLabel(this); } catch (Exception ignored) { }
+                          CharSequence l = info.loadLabel(this);
+                          c.label = String.valueOf(cl != null && cl.length() > 0 ? cl : l);
+                          for (TvInputInfo child : all) {
+                              if (info.getId().equals(child.getParentId())) {
+                                  String cn = String.valueOf(child.loadLabel(this));
+                                  if (!cn.isEmpty() && !cn.equals(c.label)) c.sub = cn;
+                                  break;
+                              }
+                          }
+                          c.intent = new Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(info.getId()));
+                          out.add(c);
+                      }
+                  } catch (Exception ignored) { }
+                  Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
+                  int[] cols = {0xffd84315, 0xff1565c0, 0xff2e7d32, 0xfff9a825, 0xff6a1b9a, 0xff00838f};
+                  for (int i = 0; i < out.size(); i++) out.get(i).color = cols[i % cols.length];
+                  return out;
+              }
+
+              /** Picks the main colour of an app icon, darkened a little so a white belly stands out. */
+              int iconColor(Bitmap b) {
+                  float[] hsv = new float[3];
+                  long r = 0, g = 0, bl = 0, wsum = 0;
+                  int w = b.getWidth(), h = b.getHeight();
+                  for (int y = 0; y < h; y += 3) {
+                      for (int x = 0; x < w; x += 3) {
+                          int c = b.getPixel(x, y);
+                          if (((c >>> 24) & 0xff) < 200) continue;
+                          Color.colorToHSV(c, hsv);
+                          if (hsv[1] < 0.35f || hsv[2] < 0.25f) continue;
+                          int wt = (int) (hsv[1] * hsv[2] * 100);
+                          r += ((c >> 16) & 0xff) * wt;
+                          g += ((c >> 8) & 0xff) * wt;
+                          bl += (c & 0xff) * wt;
+                          wsum += wt;
+                      }
+                  }
+                  if (wsum < 300) return 0xff37474f;
+                  int rr = (int) (r / wsum) * 80 / 100, gg = (int) (g / wsum) * 80 / 100, bb = (int) (bl / wsum) * 80 / 100;
+                  return 0xff000000 | (rr << 16) | (gg << 8) | bb;
               }
 
               Bitmap toBitmap(Drawable d, int size) {
@@ -1013,7 +1135,8 @@ jobs:
                           synchronized (lock) { list = apps; }
                           update(dt, list);
                           if (scene == SCENE_ISLAND) drawIsland(c, list);
-                          else drawRoom(c);
+                          else if (scene == SCENE_IGLOO) drawRoom(c);
+                          else drawFire(c);
                           drawOverlays(c);
                       } catch (Exception ex) {
                           // keep the loop alive no matter what
@@ -1041,12 +1164,21 @@ jobs:
                   while ((k = keyQueue.poll()) != null) handleKey(k & ~REPEAT_FLAG, (k & REPEAT_FLAG) != 0, list);
 
                   boolean inputHeld = kUp || kDown || kLeft || kRight || axX != 0 || axY != 0;
-                  boolean frozen = overlay != OV_NONE || pendingScene >= 0 || launching != null;
+                  boolean frozen = overlay != OV_NONE || pendingScene >= 0 || launching != null || sittingChair != null || scene == SCENE_FIRE;
 
                   if (launching != null) {
                       launchT += dt;
                       if (launchT > 0.35f) { launch(launching); launching = null; }
                   }
+                  if (sittingChair != null) {
+                      chairT += dt;
+                      if (chairT > 0.7f) {
+                          Chair ch = sittingChair;
+                          sittingChair = null;
+                          startIntent(ch.intent, ch.label);
+                      }
+                  }
+                  if (scene == SCENE_FIRE) updateFire(dt);
 
                   // Player emotes
                   if (pEmote != E_NONE) {
@@ -1117,8 +1249,10 @@ jobs:
 
                   // "Say hi" chirp when a new thing comes into reach
                   String nk = "";
-                  AppPeng near = scene == SCENE_ISLAND ? nearestApp(list) : null;
+                  Object tgt = scene == SCENE_ISLAND ? nearestTarget(list) : null;
+                  AppPeng near = tgt instanceof AppPeng ? (AppPeng) tgt : null;
                   if (near != null) nk = near.pkg;
+                  else if (tgt instanceof Chair) nk = ((Chair) tgt).key;
                   else {
                       String obj = nearObject();
                       if (obj != null) nk = obj;
@@ -1241,31 +1375,7 @@ jobs:
                           continue;
                       }
 
-                      float pdx = px - a.x, pdy = py - a.y;
-                      if (pdx * pdx + pdy * pdy < 130 * 130 && scene == SCENE_ISLAND) {
-                          a.moving = false;
-                          a.facing = faceToward(a.x, a.y, px, py);
-                      } else if (a.wait > 0) {
-                          a.wait -= dt;
-                          a.moving = false;
-                          if (rnd.nextFloat() < dt * 0.06f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
-                      } else {
-                          float dx = a.tx - a.x, dy = a.ty - a.y;
-                          float d = (float) Math.sqrt(dx * dx + dy * dy);
-                          if (d < 2) {
-                              a.wait = 1.5f + rnd.nextFloat() * 3.5f;
-                              a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 90;
-                              a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
-                              a.moving = false;
-                          } else {
-                              float speed = d > 150 ? 110f : 32f;
-                              float stepLen = Math.min(d, speed * dt);
-                              a.x += dx / d * stepLen;
-                              a.y += dy / d * stepLen;
-                              a.moving = true;
-                              a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
-                          }
-                      }
+                      npcThink(a, dt, list);
                       a.phase += dt * (a.moving ? 10f : 3f);
                   }
 
@@ -1346,6 +1456,155 @@ jobs:
                   }
               }
 
+              void npcThink(AppPeng a, float dt, List<AppPeng> list) {
+                  float pdx = px - a.x, pdy = py - a.y;
+                  if (pdx * pdx + pdy * pdy < 130 * 130) {
+                      if (a.chatWith != null) endChat(a);
+                      a.moving = false;
+                      a.facing = faceToward(a.x, a.y, px, py);
+                      return;
+                  }
+                  if (a.chatWith != null && a.chatTalking) {
+                      AppPeng o = a.chatWith;
+                      a.moving = false;
+                      a.facing = faceToward(a.x, a.y, o.x, o.y);
+                      a.chatT += dt;
+                      if (a.speaking) {
+                          a.speakT -= dt;
+                          if (a.speakT <= 0) {
+                              a.speaking = false;
+                              o.speaking = true;
+                              o.speakT = 1f + rnd.nextFloat() * 1.4f;
+                              o.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
+                              float roll = rnd.nextFloat();
+                              if (roll < 0.22f) npcEmote(o, E_FLAP, 0.6f, 0);
+                              else if (roll < 0.4f) npcEmote(a, E_HOP, 0.5f, 0);
+                              if (dist2(a.x, a.y, px, py) < 700 * 700) play(S_CHIRP, 0.12f, 1.2f + rnd.nextFloat() * 0.4f);
+                          }
+                      }
+                      if (a.chatT > a.chatDur) endChat(a);
+                      return;
+                  }
+                  if (a.chatWith == null && a.wait > 0) {
+                      a.wait -= dt;
+                      a.moving = false;
+                      float roll = rnd.nextFloat();
+                      if (roll < dt * 0.06f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
+                      else if (roll < dt * 0.12f) tryStartChat(a, list);
+                      return;
+                  }
+                  if (a.chatWith != null) {
+                      a.chatT += dt;
+                      if (a.chatT > 9) { endChat(a); return; }
+                  }
+                  float dx = a.tx - a.x, dy = a.ty - a.y;
+                  float d = (float) Math.sqrt(dx * dx + dy * dy);
+                  if (d < 2) {
+                      a.moving = false;
+                      if (a.chatWith != null) {
+                          AppPeng o = a.chatWith;
+                          a.arrived = true;
+                          a.facing = faceToward(a.x, a.y, o.x, o.y);
+                          if (o.arrived) {
+                              float dur = 5 + rnd.nextFloat() * 5;
+                              a.chatTalking = o.chatTalking = true;
+                              a.chatT = o.chatT = 0;
+                              a.chatDur = o.chatDur = dur;
+                              a.speaking = true;
+                              a.speakT = 1f + rnd.nextFloat();
+                              a.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
+                          }
+                          return;
+                      }
+                      a.wait = 1.5f + rnd.nextFloat() * 3.5f;
+                      a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 90;
+                      a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
+                  } else {
+                      float speed = d > 150 && a.chatWith == null ? 110f : 40f;
+                      float stepLen = Math.min(d, speed * dt);
+                      a.x += dx / d * stepLen;
+                      a.y += dy / d * stepLen;
+                      a.moving = true;
+                      a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
+                  }
+              }
+
+              void tryStartChat(AppPeng a, List<AppPeng> list) {
+                  AppPeng best = null;
+                  float bd = 320 * 320;
+                  for (AppPeng o : list) {
+                      if (o == a || o.chatWith != null || o.emote != E_NONE) continue;
+                      if (dist2(o.x, o.y, px, py) < 160 * 160) continue;
+                      float d = dist2(o.hx, o.hy, a.hx, a.hy);
+                      if (d < bd) { bd = d; best = o; }
+                  }
+                  if (best == null) return;
+                  AppPeng o = best;
+                  float mx = (a.x + o.x) / 2, my = (a.y + o.y) / 2;
+                  AppPeng leftOne = a.x <= o.x ? a : o, rightOne = leftOne == a ? o : a;
+                  leftOne.tx = mx - 30; rightOne.tx = mx + 30;
+                  leftOne.ty = rightOne.ty = my;
+                  a.chatWith = o; o.chatWith = a;
+                  a.chatTalking = o.chatTalking = false;
+                  a.arrived = o.arrived = false;
+                  a.chatT = o.chatT = 0;
+                  a.wait = o.wait = 0;
+              }
+
+              void endChat(AppPeng a) {
+                  AppPeng o = a.chatWith;
+                  AppPeng[] both = o != null ? new AppPeng[]{a, o} : new AppPeng[]{a};
+                  for (AppPeng q : both) {
+                      q.chatWith = null;
+                      q.chatTalking = q.speaking = q.arrived = false;
+                      q.bubble = null;
+                      q.tx = q.hx + (rnd.nextFloat() - 0.5f) * 60;
+                      q.ty = q.hy + (rnd.nextFloat() - 0.5f) * 40;
+                      q.wait = 0;
+                  }
+              }
+
+              void updateFire(float dt) {
+                  fireHintT += dt;
+                  // sparks
+                  if (rnd.nextFloat() < dt * 16) spark(640 + (rnd.nextFloat() - 0.5f) * 380, 560, false);
+                  if (rnd.nextFloat() < dt * 0.7f) {
+                      float x = 640 + (rnd.nextFloat() - 0.5f) * 300;
+                      for (int i = 0; i < 9; i++) spark(x, 570, true);
+                  }
+                  // little flame wisps that break off
+                  if (rnd.nextFloat() < dt * 3) {
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 260, 330 + rnd.nextFloat() * 80, false);
+                      q.vx = (rnd.nextFloat() - 0.5f) * 30; q.vy = -90 - rnd.nextFloat() * 50;
+                      q.max = q.life = 0.5f; q.size = 7 + rnd.nextFloat() * 6; q.color = 0xffffa726;
+                  }
+              }
+
+              void spark(float x, float y, boolean pop) {
+                  Part q = part(x, y, false);
+                  q.vx = (rnd.nextFloat() - 0.5f) * (pop ? 260 : 60);
+                  q.vy = pop ? -150 - rnd.nextFloat() * 250 : -120 - rnd.nextFloat() * 160;
+                  q.g = pop ? 160 : 20;
+                  q.max = q.life = 1.2f + rnd.nextFloat() * 1.5f;
+                  q.size = pop ? 2.2f : 1.4f + rnd.nextFloat() * 1.4f;
+                  q.color = rnd.nextBoolean() ? 0xffffe082 : 0xffffab40;
+              }
+
+              Object nearestTarget(List<AppPeng> list) {
+                  Object best = null;
+                  float bd = NEAR_DIST * NEAR_DIST;
+                  for (AppPeng a : list) {
+                      float d = dist2(a.x, a.y, px, py);
+                      if (d < bd) { bd = d; best = a; }
+                  }
+                  float cd = Math.min(bd, 75 * 75);
+                  for (Chair c : chairs) {
+                      float d = dist2(c.x, c.y + 12, px, py);
+                      if (d < cd) { cd = d; best = c; }
+                  }
+                  return best;
+              }
+
               float ballZ(Ball b) {
                   float u = b.t / b.dur;
                   return 30 * (1 - u) + 4 * 45 * u * (1 - u);
@@ -1409,7 +1668,7 @@ jobs:
                       case "exit": return "Press OK to go outside";
                       case "tv": return "Press OK for TV Settings";
                       case "shelf": return "Press OK for Island settings";
-                      case "fire": return "Press OK to warm up by the fire";
+                      case "fire": return "Press OK to sit by the fire";
                       default: return "";
                   }
               }
@@ -1456,7 +1715,11 @@ jobs:
                       return;
                   }
 
-                  if (launching != null) return;
+                  if (scene == SCENE_FIRE) {
+                      if (back || ok) goScene(SCENE_IGLOO);
+                      return;
+                  }
+                  if (launching != null || sittingChair != null) return;
                   if (back) {
                       if (scene == SCENE_IGLOO) { goScene(SCENE_ISLAND); return; }
                       runOnUiThread(this::finish);
@@ -1468,11 +1731,20 @@ jobs:
                   if (code == KeyEvent.KEYCODE_BUTTON_R1) { startEmote(E_DANCE, 3.2f); return; }
                   if (ok) {
                       if (scene == SCENE_ISLAND) {
-                          AppPeng a = nearestApp(list);
-                          if (a != null) {
-                              launching = a; launchT = 0;
+                          Object tgt = nearestTarget(list);
+                          if (tgt instanceof AppPeng) {
+                              launching = (AppPeng) tgt; launchT = 0;
                               pEmote = E_NONE;
                               play(S_OPEN, 0.5f, 1f);
+                              return;
+                          }
+                          if (tgt instanceof Chair) {
+                              Chair ch = (Chair) tgt;
+                              sittingChair = ch;
+                              chairT = 0;
+                              px = ch.x; py = ch.y + 1; facing = DOWN;
+                              pEmote = E_SIT; pEmoteT = 0; pEmoteDur = 0;
+                              play(S_OPEN, 0.5f, 0.85f);
                               return;
                           }
                       }
@@ -1512,7 +1784,7 @@ jobs:
                       case "exit": play(S_DOOR, 0.5f, 0.9f); goScene(SCENE_ISLAND); break;
                       case "tv": play(S_OPEN, 0.5f, 0.9f); startIntent(new Intent(Settings.ACTION_SETTINGS), "Settings"); break;
                       case "shelf": openSettings(); break;
-                      case "fire": facing = UP; startEmote(E_SIT, 0); break;
+                      case "fire": play(S_DOOR, 0.3f, 1.3f); goScene(SCENE_FIRE); break;
                   }
               }
 
@@ -1523,9 +1795,20 @@ jobs:
               }
 
               void enterScene(int s) {
-                  if (s == SCENE_IGLOO) {
-                      islandX = px; islandY = py;
-                      px = 640; py = 640; facing = UP;
+                  if (s == SCENE_FIRE) {
+                      fireHintT = 0;
+                      parts.clear();
+                      startCrackle();
+                  } else if (s == SCENE_IGLOO) {
+                      if (scene == SCENE_FIRE) {
+                          stopCrackle();
+                          parts.clear();
+                          px = 640; py = 455; facing = UP;
+                          pEmote = E_SIT; pEmoteT = 0; pEmoteDur = 0;
+                      } else {
+                          islandX = px; islandY = py;
+                          px = 640; py = 640; facing = UP;
+                      }
                   } else {
                       px = DOOR_X; py = DOOR_Y + 40; facing = DOWN;
                   }
@@ -1550,6 +1833,12 @@ jobs:
                   listItems.add(new Item("Sound effects", soundOn ? "On" : "Off", null, () -> {
                       soundOn = !soundOn;
                       prefs.edit().putBoolean("sound", soundOn).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
+                  listItems.add(new Item("Penguin icons", bellyIcons ? "On belly" : "Above head", null, () -> {
+                      bellyIcons = !bellyIcons;
+                      prefs.edit().putBoolean("belly", bellyIcons).apply();
                       play(S_TOGGLE, 0.5f, 1f);
                       refreshSettings();
                   }));
@@ -1604,6 +1893,21 @@ jobs:
                           play(S_TOGGLE, 0.5f, hidden.contains(app.pkg) ? 0.8f : 1.1f);
                       });
                       listItems.add(holderItem[0]);
+                  }
+                  List<Chair> allCh;
+                  synchronized (lock) { allCh = allChairs; }
+                  for (Chair ch : allCh) {
+                      final Chair chair = ch;
+                      final Item[] hi = new Item[1];
+                      String lab = ch.label + (ch.sub != null ? " · " + ch.sub : "") + "  (chair)";
+                      hi[0] = new Item(lab, hidden.contains(ch.key) ? "Hidden" : "On island", null, () -> {
+                          if (hidden.contains(chair.key)) hidden.remove(chair.key); else hidden.add(chair.key);
+                          prefs.edit().putStringSet("hidden", new HashSet<>(hidden)).apply();
+                          hi[0].value = hidden.contains(chair.key) ? "Hidden" : "On island";
+                          synchronized (lock) { relayout(); }
+                          play(S_TOGGLE, 0.5f, 1f);
+                      });
+                      listItems.add(hi[0]);
                   }
                   listItems.add(new Item("Done", "", null, () -> {
                       if (listOnBack != null) listOnBack.run(); else overlay = OV_NONE;
@@ -1750,21 +2054,29 @@ jobs:
                   for (Ball b : balls) c.drawOval(b.x - 6, b.y - 2.5f, b.x + 6, b.y + 2.5f, p);
 
                   // Penguins, back to front
-                  AppPeng near = launching != null ? launching : nearestApp(list);
+                  Object tgt = launching != null ? launching : (sittingChair != null ? sittingChair : nearestTarget(list));
+                  AppPeng near = tgt instanceof AppPeng ? (AppPeng) tgt : null;
+                  Chair nearCh = tgt instanceof Chair ? (Chair) tgt : null;
+                  List<Chair> chs = chairs;
                   drawList.clear();
                   drawList.addAll(list);
+                  drawList.addAll(chs);
                   drawList.add(this);
                   Collections.sort(drawList, (a, b) -> Float.compare(yOf(a), yOf(b)));
                   boolean xmas = season == SEASON_XMAS;
                   for (Object o : drawList) {
                       if (o == this) {
                           drawPlayer(c);
+                      } else if (o instanceof Chair) {
+                          drawChair(c, (Chair) o);
                       } else {
                           AppPeng a = (AppPeng) o;
                           if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
                           int e = a.emoteDelay > 0 ? E_NONE : a.emote;
                           drawPenguin(c, a.x, a.y, 1f, a.scarf, a.facing, a.phase, a.moving, false,
-                                  e, a.emoteT, a.blinkT > 0, xmas, a.hitT);
+                                  e, a.emoteT, a.blinkT > 0, xmas, a.hitT,
+                                  bellyIcons ? a.bodyCol : PENGUIN_BLACK, bellyIcons ? a.icon : null,
+                                  a.speaking && a.chatTalking);
                       }
                   }
 
@@ -1798,9 +2110,13 @@ jobs:
                   // Signs stay bright
                   c.save();
                   c.translate(-camX, -camY);
+                  for (Chair ch : chs) drawChairSign(c, ch, ch == nearCh);
                   for (AppPeng a : list) {
                       if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
                       drawSign(c, a, a == near);
+                      if (a.speaking && a.chatTalking && a.bubble != null) {
+                          drawBubble(c, a.x + (a.facing == LEFT ? -42 : 42), a.y - 58, a.bubble, a.facing == LEFT);
+                      }
                   }
                   c.restore();
 
@@ -1811,6 +2127,9 @@ jobs:
                   String msg = null;
                   if (overlay == OV_NONE && launching == null) {
                       if (near != null) msg = "Press OK to open " + near.label;
+                      else if (nearCh != null && sittingChair == null)
+                          msg = "Press OK to watch " + nearCh.label + (nearCh.sub != null ? " (" + nearCh.sub + ")" : "");
+                      else if (sittingChair != null) msg = "Switching to " + sittingChair.label + "…";
                       else {
                           String o = nearObject();
                           if (o != null) msg = objectLabel(o);
@@ -1830,7 +2149,7 @@ jobs:
                   if (pEmote == E_LOOK) f = ((int) (pEmoteT / 0.55f)) % 3 == 1 ? LEFT : ((int) (pEmoteT / 0.55f)) % 3 == 2 ? RIGHT : DOWN;
                   if (pEmote == E_DANCE) f = ((int) (pEmoteT / 0.2f)) % 4;
                   drawPenguin(c, px, py - hop, 1.12f, PLAYER_SCARF, f, walkPhase, moving, true,
-                          pEmote, pEmoteT, pBlinkT > 0 || pEmote == E_NAP, false, pHitT);
+                          pEmote, pEmoteT, pBlinkT > 0 || pEmote == E_NAP, false, pHitT, PENGUIN_BLACK, null, false);
               }
 
               void drawSeasonGround(Canvas c, int season, float night) {
@@ -1850,7 +2169,7 @@ jobs:
                           }
                       }
                       // Decorated tree with presents
-                      float tx = IGLOO_X + 200, ty = IGLOO_Y + 15;
+                      float tx = IGLOO_X - 215, ty = IGLOO_Y - 70;
                       drawTree(c, p, tx, ty, 1.5f);
                       int[] orn = {0xffe53935, 0xfffdd835, 0xff1e88e5, 0xffff80ab};
                       float[][] spots = {{-25, -40}, {18, -48}, {-12, -70}, {14, -88}, {-4, -100}, {28, -30}, {-30, -25}};
@@ -1866,7 +2185,7 @@ jobs:
                       p.setColor(0xff1e88e5); c.drawRect(tx + 14, ty - 2, tx + 36, ty + 18, p);
                       p.setColor(0xffffffff); c.drawRect(tx + 23, ty - 2, tx + 27, ty + 18, p);
                   } else if (season == SEASON_HALLOWEEN) {
-                      float[][] pk = {{-170, 50}, {-110, 75}, {110, 75}, {170, 50}, {230, 10}, {-230, 10}};
+                      float[][] pk = {{-48, 100}, {48, 100}, {-52, 160}, {52, 160}};
                       for (float[] q : pk) drawPumpkin(c, IGLOO_X + q[0], IGLOO_Y + q[1], night);
                   }
               }
@@ -1937,7 +2256,9 @@ jobs:
               }
 
               float yOf(Object o) {
-                  return o == this ? py : ((AppPeng) o).y;
+                  if (o == this) return py;
+                  if (o instanceof Chair) return ((Chair) o).y;
+                  return ((AppPeng) o).y;
               }
 
               float nightAmount() {
@@ -2006,36 +2327,39 @@ jobs:
               // ================================================================== drawing: penguins
 
               void drawPenguin(Canvas c, float x, float y, float s, int scarf, int face, float phase, boolean walking,
-                               boolean player, int emote, float et, boolean blink, boolean xmasHat, float hitT) {
+                               boolean player, int emote, float et, boolean blink, boolean xmasHat, float hitT,
+                               int bodyCol, Bitmap bellyIcon, boolean talking) {
                   boolean sitting = emote == E_NAP || emote == E_SIT;
                   float hop = 0;
                   if (emote == E_HOP) hop = (float) Math.abs(Math.sin(et / 0.6f * Math.PI)) * 12;
                   if (emote == E_DANCE) hop = (float) Math.abs(Math.sin(et * 10)) * 10;
                   float shake = emote == E_FLINCH ? (float) Math.sin(et * 60) * 3 : 0;
+                  final float bw = 24;
 
                   c.save();
                   c.translate(x + shake, y);
                   c.scale(s, s);
 
                   p.setColor(0x30000000);
-                  c.drawOval(-22, -6, 22, 6, p);
+                  c.drawOval(-27, -6, 27, 6, p);
                   c.translate(0, -hop);
 
                   float sway = walking ? (float) Math.sin(phase) * 7f : (float) Math.sin(phase * 0.5f) * 1.5f;
                   if (emote == E_DANCE) sway = (float) Math.sin(et * 9) * 12;
                   c.rotate(sway);
 
-                  float headY = sitting ? -48 : -60;
+                  float headY = sitting ? -43 : -52;
 
                   // Feet
                   p.setColor(0xffef8a3c);
                   if (sitting) {
-                      c.drawOval(-14, -6, -2, 4, p);
-                      c.drawOval(2, -6, 14, 4, p);
+                      c.drawOval(-16, -6, -3, 4, p);
+                      c.drawOval(3, -6, 16, 4, p);
                   } else {
                       float lift = walking ? (float) Math.sin(phase) * 3f : 0;
-                      c.drawOval(-15, -5 - Math.max(0, lift), -3, 2 - Math.max(0, lift), p);
-                      c.drawOval(3, -5 - Math.max(0, -lift), 15, 2 - Math.max(0, -lift), p);
+                      float l1 = Math.max(0, lift), l2 = Math.max(0, -lift);
+                      c.drawOval(-17, -5 - l1, -4, 2 - l1, p);
+                      c.drawOval(4, -5 - l2, 17, 2 - l2, p);
                   }
 
                   // Flippers
@@ -2051,33 +2375,43 @@ jobs:
                       rightA = et < 0.12f ? 40 : -120;
                   } else if (emote == E_FLINCH) {
                       leftA = 60; rightA = -60;
+                  } else if (talking) {
+                      rightA = -30 - (float) Math.abs(Math.sin(time * 5)) * 25;
                   }
-                  float shoulder = headY + 20;
-                  p.setColor(0xff1b2230);
+                  float shoulder = headY + 18;
+                  p.setColor(bodyCol);
                   c.save();
-                  c.rotate(leftA, -18, shoulder);
-                  c.drawOval(-25, headY + 16, -14, headY + 42, p);
+                  c.rotate(leftA, -bw + 2, shoulder);
+                  c.drawOval(-bw - 5, headY + 14, -bw + 6, headY + 38, p);
                   c.restore();
                   c.save();
-                  c.rotate(rightA, 18, shoulder);
-                  c.drawOval(14, headY + 16, 25, headY + 42, p);
+                  c.rotate(rightA, bw - 2, shoulder);
+                  c.drawOval(bw - 6, headY + 14, bw + 5, headY + 38, p);
                   c.restore();
 
                   // Body and head
-                  c.drawOval(sitting ? -21 : -20, headY - 2, sitting ? 21 : 20, 0, p);
-                  c.drawCircle(0, headY, 15, p);
+                  c.drawOval(sitting ? -bw - 1 : -bw, headY - 2, sitting ? bw + 1 : bw, 0, p);
+                  c.drawCircle(0, headY, 16, p);
 
                   if (face != UP) {
                       p.setColor(0xfffafcff);
-                      if (face == DOWN) c.drawOval(-14, headY + 10, 14, -3, p);
-                      else if (face == LEFT) c.drawOval(-17, headY + 12, 5, -4, p);
-                      else c.drawOval(-5, headY + 12, 17, -4, p);
+                      float bcx;
+                      if (face == DOWN) { c.drawOval(-18, headY + 9, 18, -3, p); bcx = 0; }
+                      else if (face == LEFT) { c.drawOval(-22, headY + 11, 5, -4, p); bcx = -8; }
+                      else { c.drawOval(-5, headY + 11, 22, -4, p); bcx = 8; }
+
+                      if (bellyIcon != null) {
+                          float bcy = (headY + 9 - 3) / 2f + 3;
+                          float hw = face == DOWN ? 12 : 8, hh = face == DOWN ? 12 : 11;
+                          rf.set(bcx - hw, bcy - hh, bcx + hw, bcy + hh);
+                          c.drawBitmap(bellyIcon, null, rf, p);
+                      }
 
                       float ex1, ex2, bx;
                       boolean twoEyes = face == DOWN;
-                      if (face == DOWN) { ex1 = -6; ex2 = 6; bx = 0; }
-                      else if (face == LEFT) { ex1 = -7; ex2 = -7; bx = -1; }
-                      else { ex1 = 7; ex2 = 7; bx = 1; }
+                      if (face == DOWN) { ex1 = -6.5f; ex2 = 6.5f; bx = 0; }
+                      else if (face == LEFT) { ex1 = -7.5f; ex2 = -7.5f; bx = -1; }
+                      else { ex1 = 7.5f; ex2 = 7.5f; bx = 1; }
                       float eyeY = headY - 4;
                       if (blink) {
                           p.setStyle(Paint.Style.STROKE);
@@ -2088,58 +2422,67 @@ jobs:
                           p.setStyle(Paint.Style.FILL);
                       } else {
                           p.setColor(0xffffffff);
-                          c.drawCircle(ex1, eyeY, 4.2f, p);
-                          if (twoEyes) c.drawCircle(ex2, eyeY, 4.2f, p);
+                          c.drawCircle(ex1, eyeY, 4.4f, p);
+                          if (twoEyes) c.drawCircle(ex2, eyeY, 4.4f, p);
                           p.setColor(0xff111111);
                           float look = face == LEFT ? -1 : face == RIGHT ? 1 : 0;
-                          c.drawCircle(ex1 + look, eyeY + 0.5f, 2.1f, p);
-                          if (twoEyes) c.drawCircle(ex2 + look, eyeY + 0.5f, 2.1f, p);
+                          c.drawCircle(ex1 + look, eyeY + 0.5f, 2.2f, p);
+                          if (twoEyes) c.drawCircle(ex2 + look, eyeY + 0.5f, 2.2f, p);
                       }
                       p.setColor(0xffffa726);
+                      boolean open = talking && Math.sin(time * 22) > 0;
                       path.reset();
                       if (bx == 0) {
-                          path.moveTo(-4.5f, headY + 1); path.lineTo(4.5f, headY + 1); path.lineTo(0, headY + 8);
+                          if (open) {
+                              path.moveTo(-4.5f, headY + 1); path.lineTo(4.5f, headY + 1); path.lineTo(0, headY + 5); path.close();
+                              path.moveTo(-3.5f, headY + 6); path.lineTo(3.5f, headY + 6); path.lineTo(0, headY + 10); path.close();
+                          } else {
+                              path.moveTo(-4.5f, headY + 1); path.lineTo(4.5f, headY + 1); path.lineTo(0, headY + 8); path.close();
+                          }
                       } else {
-                          path.moveTo(bx * 11, headY - 1); path.lineTo(bx * 11, headY + 5); path.lineTo(bx * 21, headY + 2);
+                          if (open) {
+                              path.moveTo(bx * 12, headY - 2); path.lineTo(bx * 12, headY + 1); path.lineTo(bx * 22, headY - 1); path.close();
+                              path.moveTo(bx * 12, headY + 3); path.lineTo(bx * 12, headY + 6); path.lineTo(bx * 20, headY + 6); path.close();
+                          } else {
+                              path.moveTo(bx * 12, headY - 1); path.lineTo(bx * 12, headY + 5); path.lineTo(bx * 22, headY + 2); path.close();
+                          }
                       }
-                      path.close();
                       c.drawPath(path, p);
                   }
 
                   // Scarf
                   p.setColor(scarf);
-                  rf.set(-17, headY + 9, 17, headY + 16);
+                  rf.set(-19, headY + 9, 19, headY + 16);
                   c.drawRoundRect(rf, 4, 4, p);
-                  float tailX = face == LEFT ? 8 : face == RIGHT ? -14 : 5;
+                  float tailX = face == LEFT ? 9 : face == RIGHT ? -16 : 6;
                   float wv = walking ? (float) Math.sin(phase * 1.3f) * 2 : 0;
-                  rf.set(tailX, headY + 13, tailX + 7, headY + 28 + wv);
+                  rf.set(tailX, headY + 13, tailX + 7, headY + 27 + wv);
                   c.drawRoundRect(rf, 3, 3, p);
 
                   if (player) {
-                      rf.set(-14, headY - 20, 14, headY);
+                      rf.set(-16, headY - 22, 16, headY + 2);
                       c.drawArc(rf, 180, 180, true, p);
                       p.setColor(0xffffffff);
-                      rf.set(-15, headY - 12, 15, headY - 7);
+                      rf.set(-17, headY - 13, 17, headY - 8);
                       c.drawRoundRect(rf, 2, 2, p);
-                      c.drawCircle(0, headY - 20, 4.5f, p);
+                      c.drawCircle(0, headY - 22, 4.5f, p);
                   } else if (xmasHat) {
                       p.setColor(0xffd32f2f);
                       path.reset();
-                      path.moveTo(-12, headY - 9); path.lineTo(12, headY - 9); path.lineTo(10, headY - 28); path.close();
+                      path.moveTo(-13, headY - 10); path.lineTo(13, headY - 10); path.lineTo(11, headY - 30); path.close();
                       c.drawPath(path, p);
                       p.setColor(0xffffffff);
-                      rf.set(-13, headY - 12, 13, headY - 7);
+                      rf.set(-14, headY - 13, 14, headY - 8);
                       c.drawRoundRect(rf, 2, 2, p);
-                      c.drawCircle(10, headY - 28, 3.5f, p);
+                      c.drawCircle(11, headY - 30, 3.5f, p);
                   }
 
-                  // Got hit by a snowball
                   if (hitT > 0) {
                       int a = (int) (255 * Math.min(1, hitT));
                       p.setColor((a << 24) | 0xffffff);
-                      c.drawCircle(-5, headY - 12, 7, p);
-                      c.drawCircle(5, headY - 14, 6, p);
-                      c.drawCircle(0, headY - 18, 5, p);
+                      c.drawCircle(-5, headY - 13, 7, p);
+                      c.drawCircle(5, headY - 15, 6, p);
+                      c.drawCircle(0, headY - 19, 5, p);
                   }
                   c.restore();
               }
@@ -2197,50 +2540,306 @@ jobs:
 
               void drawSign(Canvas c, AppPeng a, boolean highlight) {
                   float bob = (float) Math.sin(time * 2f + a.phase) * 3f;
-                  float s = highlight ? 1.25f : 1f;
-                  float cx = a.x, cy = a.y - 105 + bob - (highlight ? 8 : 0);
-                  float half = 30 * s;
+                  if (bellyIcons) {
+                      if (highlight) drawNameTag(c, a.x, a.y - 80 + bob, a.label);
+                      return;
+                  }
+                  float s = highlight ? 1.35f : 1f;
+                  float cx = a.x, cy = a.y - 86 + bob - (highlight ? 8 : 0);
+                  float half = 20 * s;
 
                   p.setColor(0xffffffff);
                   path.reset();
-                  path.moveTo(cx - 7, cy + half - 1); path.lineTo(cx + 7, cy + half - 1); path.lineTo(cx, cy + half + 9);
+                  path.moveTo(cx - 5, cy + half - 1); path.lineTo(cx + 5, cy + half - 1); path.lineTo(cx, cy + half + 7);
                   path.close();
                   c.drawPath(path, p);
 
                   p.setColor(0x40000000);
-                  rf.set(cx - half + 2, cy - half + 4, cx + half + 2, cy + half + 4);
-                  c.drawRoundRect(rf, 12, 12, p);
+                  rf.set(cx - half + 2, cy - half + 3, cx + half + 2, cy + half + 3);
+                  c.drawRoundRect(rf, 9, 9, p);
                   p.setColor(0xffffffff);
                   rf.set(cx - half, cy - half, cx + half, cy + half);
-                  c.drawRoundRect(rf, 12, 12, p);
+                  c.drawRoundRect(rf, 9, 9, p);
                   if (highlight) {
                       p.setStyle(Paint.Style.STROKE);
-                      p.setStrokeWidth(4);
+                      p.setStrokeWidth(3.5f);
                       p.setColor(a.scarf);
-                      c.drawRoundRect(rf, 12, 12, p);
+                      c.drawRoundRect(rf, 9, 9, p);
                       p.setStyle(Paint.Style.FILL);
                   }
                   if (a.icon != null) {
-                      float ih = 23 * s;
+                      float ih = 15.5f * s;
                       rf.set(cx - ih, cy - ih, cx + ih, cy + ih);
                       c.drawBitmap(a.icon, null, rf, p);
                   } else {
                       tp.setColor(0xff37474f);
-                      tp.setTextSize(28 * s);
+                      tp.setTextSize(20 * s);
                       tp.setTextAlign(Paint.Align.CENTER);
-                      c.drawText(a.label.substring(0, 1).toUpperCase(Locale.getDefault()), cx, cy + 10 * s, tp);
+                      c.drawText(a.label.substring(0, 1).toUpperCase(Locale.getDefault()), cx, cy + 7 * s, tp);
                   }
-                  if (highlight) {
-                      String name = a.label.length() > 20 ? a.label.substring(0, 19) + "…" : a.label;
-                      tp.setTextSize(22);
+                  if (highlight) drawNameTag(c, cx, cy - half - 6, a.label);
+              }
+
+              void drawNameTag(Canvas c, float cx, float bottom, String label) {
+                  String name = label.length() > 22 ? label.substring(0, 21) + "…" : label;
+                  tp.setTextSize(21);
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  float tw = tp.measureText(name);
+                  rf.set(cx - tw / 2 - 12, bottom - 32, cx + tw / 2 + 12, bottom);
+                  p.setColor(0xe0263238);
+                  c.drawRoundRect(rf, 14, 14, p);
+                  tp.setColor(0xffffffff);
+                  c.drawText(name, cx, bottom - 9, tp);
+              }
+
+              void drawBubble(Canvas c, float x, float y, String text, boolean tailRight) {
+                  tp.setTextSize(17);
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  float tw = Math.max(18, tp.measureText(text)) + 18;
+                  p.setColor(0x30000000);
+                  rf.set(x - tw / 2 + 2, y - 30, x + tw / 2 + 2, y + 2);
+                  c.drawRoundRect(rf, 13, 13, p);
+                  p.setColor(0xffffffff);
+                  rf.set(x - tw / 2, y - 32, x + tw / 2, y);
+                  c.drawRoundRect(rf, 13, 13, p);
+                  path.reset();
+                  float tx = tailRight ? x + tw / 2 - 10 : x - tw / 2 + 10;
+                  path.moveTo(tx - 5, y - 2); path.lineTo(tx + 5, y - 2); path.lineTo(tx + (tailRight ? 10 : -10), y + 9);
+                  path.close();
+                  c.drawPath(path, p);
+                  tp.setColor(0xff37474f);
+                  c.drawText(text, x, y - 10, tp);
+              }
+
+              /** A lawn chair for each HDMI input. */
+              void drawChair(Canvas c, Chair ch) {
+                  float x = ch.x, y = ch.y;
+                  int col = ch.color;
+                  int light = blend(col, 0xffffffff, 0.25f), dark = blend(col, 0xff000000, 0.3f);
+                  p.setColor(0x30000000);
+                  c.drawOval(x - 30, y - 6, x + 30, y + 9, p);
+                  // back slats fanning out
+                  for (int i = -2; i <= 2; i++) {
+                      c.save();
+                      c.rotate(i * 8, x, y - 16);
+                      p.setColor(i % 2 == 0 ? light : col);
+                      rf.set(x - 6, y - 62, x + 6, y - 14);
+                      c.drawRoundRect(rf, 6, 6, p);
+                      c.restore();
+                  }
+                  p.setColor(dark);
+                  c.drawRect(x - 24, y - 30, x + 24, y - 26, p);
+                  // seat
+                  path.reset();
+                  path.moveTo(x - 22, y - 18); path.lineTo(x + 22, y - 18); path.lineTo(x + 27, y); path.lineTo(x - 27, y);
+                  path.close();
+                  p.setColor(col);
+                  c.drawPath(path, p);
+                  p.setColor(light);
+                  c.drawRect(x - 24, y - 11, x + 24, y - 8, p);
+                  // arm rests and legs
+                  p.setColor(dark);
+                  rf.set(x - 36, y - 30, x - 24, y - 2);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  rf.set(x + 24, y - 30, x + 36, y - 2);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  c.drawRect(x - 27, y, x - 22, y + 6, p);
+                  c.drawRect(x + 22, y, x + 27, y + 6, p);
+              }
+
+              void drawChairSign(Canvas c, Chair ch, boolean highlight) {
+                  String t = ch.label;
+                  tp.setTextSize(highlight ? 19 : 15);
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  float tw = tp.measureText(t);
+                  float cy = ch.y - 78 - (highlight ? 6 : 0);
+                  float h = highlight ? 30 : 24;
+                  // tiny TV icon on the left of the tag
+                  float iconW = highlight ? 22 : 18;
+                  float total = tw + iconW + 26;
+                  float l = ch.x - total / 2;
+                  rf.set(l, cy - h, l + total, cy);
+                  p.setColor(highlight ? ch.color : 0xd0263238);
+                  c.drawRoundRect(rf, h / 2, h / 2, p);
+                  float ix = l + 12, iy = cy - h / 2;
+                  p.setColor(0xffffffff);
+                  rf.set(ix, iy - iconW * 0.32f, ix + iconW, iy + iconW * 0.32f);
+                  c.drawRoundRect(rf, 3, 3, p);
+                  p.setColor(highlight ? ch.color : 0xff263238);
+                  rf.set(ix + 2.5f, iy - iconW * 0.32f + 2.5f, ix + iconW - 2.5f, iy + iconW * 0.32f - 2.5f);
+                  c.drawRect(rf, p);
+                  tp.setColor(0xffffffff);
+                  c.drawText(t, ix + iconW + 8 + tw / 2, cy - h / 2 + (highlight ? 7 : 5.5f), tp);
+                  if (highlight && ch.sub != null) {
+                      tp.setTextSize(15);
+                      c.drawText(ch.sub, ch.x, cy + 18, tp);
+                  }
+              }
+
+              static int blend(int a, int b, float t) {
+                  int ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+                  int br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+                  return 0xff000000 | ((int) (ar + (br - ar) * t) << 16) | ((int) (ag + (bg - ag) * t) << 8) | (int) (ab + (bb - ab) * t);
+              }
+
+              // ================================================================== drawing: fullscreen fireplace
+
+              void bakeFireBg() {
+                  fireBg = Bitmap.createBitmap(VW, VH, Bitmap.Config.RGB_565);
+                  Canvas c = new Canvas(fireBg);
+                  Paint w = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  c.drawColor(0xff241e1b);
+                  Random r = new Random(19);
+                  int[] stones = {0xff5d5550, 0xff665d58, 0xff746b66, 0xff57504c, 0xff6b625d};
+                  for (int row = 0; row < 13; row++) {
+                      float y = row * 58 - 10;
+                      float x = -(row % 2) * 60 - r.nextInt(40);
+                      while (x < VW) {
+                          float sw = 90 + r.nextInt(60);
+                          w.setColor(stones[r.nextInt(stones.length)]);
+                          rf.set(x + 3, y + 3, x + sw - 3, y + 55);
+                          c.drawRoundRect(rf, 12, 12, w);
+                          x += sw;
+                      }
+                  }
+                  // mantle
+                  w.setColor(0xff3e2723);
+                  c.drawRect(120, 58, VW - 120, 108, w);
+                  w.setColor(0xff5d4037);
+                  c.drawRect(120, 58, VW - 120, 68, w);
+                  // opening
+                  w.setColor(0xff0c0908);
+                  rf.set(250, 150, 1030, 470);
+                  c.drawArc(rf, 180, 180, true, w);
+                  c.drawRect(250, 310, 1030, 650, w);
+                  // soot-dark back bricks
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setStrokeWidth(2);
+                  w.setColor(0xff1c1412);
+                  for (int row = 0; row < 9; row++) {
+                      float y = 320 + row * 36;
+                      c.drawLine(262, y, 1018, y, w);
+                      for (float x = 262 + (row % 2) * 40; x < 1018; x += 80) c.drawLine(x, y, x, y + 36, w);
+                  }
+                  w.setStyle(Paint.Style.FILL);
+                  // hearth
+                  w.setColor(0xff4a4441);
+                  c.drawRect(170, 640, VW - 170, VH, w);
+                  w.setColor(0xff5b5450);
+                  c.drawRect(170, 640, VW - 170, 652, w);
+                  // ember initial positions
+                  emberX = new float[70]; emberY = new float[70]; emberPh = new float[70];
+                  for (int i = 0; i < 70; i++) {
+                      emberX[i] = 380 + r.nextFloat() * 520;
+                      emberY[i] = 600 + r.nextFloat() * 36;
+                      emberPh[i] = r.nextFloat() * 6.28f;
+                  }
+              }
+
+              void drawFire(Canvas c) {
+                  if (fireBg == null) bakeFireBg();
+                  c.drawBitmap(fireBg, 0, 0, null);
+                  float flick = (float) (Math.sin(time * 9.7) * 0.5 + Math.sin(time * 15.3) * 0.3 + Math.sin(time * 23.1) * 0.2);
+
+                  // big warm glow
+                  p.setShader(new RadialGradient(640, 520, 520 + flick * 25, 0x88ff7a1a, 0x00ff7a1a, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 0, VW, VH, p);
+                  p.setShader(null);
+
+                  // glowing ember bed
+                  for (int i = 0; i < emberX.length; i++) {
+                      float g = 0.55f + 0.45f * (float) Math.sin(time * (2 + i % 5) + emberPh[i]);
+                      int rr = 255, gg = (int) (60 + 120 * g), bb = (int) (20 * g);
+                      p.setColor(0xff000000 | (rr << 16) | (gg << 8) | bb);
+                      c.drawCircle(emberX[i], emberY[i], 5 + 4 * g, p);
+                  }
+
+                  // logs
+                  drawLog(c, 640, 610, 520, 52, -6, flick);
+                  drawLog(c, 560, 585, 360, 46, 14, flick);
+                  drawLog(c, 730, 588, 360, 46, -16, flick);
+
+                  // flames: several tongues, four colour layers from deep orange to white-hot
+                  int[] cols = {0xd9ff3d00, 0xe6ff8f00, 0xf0ffca28, 0xfffff3c4};
+                  float[] scales = {1f, 0.78f, 0.55f, 0.3f};
+                  float by = 600;
+                  for (int layer = 0; layer < 4; layer++) {
+                      p.setColor(cols[layer]);
+                      float ls = scales[layer];
+                      for (int i = 0; i < 11; i++) {
+                          float base = 330 * (1 - Math.abs(i - 5) / 7f);
+                          float n = 0.62f + 0.22f * (float) Math.sin(time * 3.1f + i * 1.7f)
+                                  + 0.12f * (float) Math.sin(time * 7.3f + i * 3.1f)
+                                  + 0.07f * (float) Math.sin(time * 13.7f + i * 0.9f);
+                          float hgt = base * n * (0.55f + 0.45f * ls) * (layer == 3 ? 0.6f : 1f);
+                          float w = 52 * ls + 6;
+                          float fx = 400 + i * 48;
+                          float sx = (float) Math.sin(time * 2.3f + i) * 26 + (float) Math.sin(time * 5.1f + i * 2) * 9;
+                          path.reset();
+                          path.moveTo(fx - w, by);
+                          path.cubicTo(fx - w, by - hgt * 0.45f, fx + sx * 0.5f - w * 0.4f, by - hgt * 0.78f, fx + sx, by - hgt);
+                          path.cubicTo(fx + sx * 0.5f + w * 0.4f, by - hgt * 0.78f, fx + w, by - hgt * 0.45f, fx + w, by);
+                          path.close();
+                          c.drawPath(path, p);
+                      }
+                  }
+
+                  // seasonal mantle decor
+                  int season = activeSeason();
+                  if (season == SEASON_XMAS) {
+                      for (int i = 0; i < 5; i++) {
+                          float sx = 300 + i * 170;
+                          p.setColor(i % 2 == 0 ? 0xffc62828 : 0xff2e7d32);
+                          c.drawRect(sx, 108, sx + 36, 176, p);
+                          c.drawOval(sx - 6, 158, sx + 50, 190, p);
+                          p.setColor(0xffffffff);
+                          c.drawRect(sx - 3, 104, sx + 39, 122, p);
+                      }
+                  } else if (season == SEASON_HALLOWEEN) {
+                      drawPumpkin(c, 220, 58, 1);
+                      drawPumpkin(c, VW - 220, 58, 1);
+                  }
+
+                  drawParts(c, false);
+
+                  // overall flicker on the room
+                  int dim = (int) (40 + flick * 18);
+                  c.drawColor(Math.max(0, dim) << 24);
+
+                  if (fireHintT < 5) {
+                      int a = (int) (255 * Math.min(1, (5 - fireHintT) / 1.5f));
                       tp.setTextAlign(Paint.Align.CENTER);
-                      float tw = tp.measureText(name);
-                      rf.set(cx - tw / 2 - 12, cy - half - 40, cx + tw / 2 + 12, cy - half - 8);
-                      p.setColor(0xe0263238);
-                      c.drawRoundRect(rf, 14, 14, p);
-                      tp.setColor(0xffffffff);
-                      c.drawText(name, cx, cy - half - 17, tp);
+                      tp.setTextSize(20);
+                      tp.setColor((a << 24) | 0xffffff);
+                      c.drawText("Back or OK to step away from the fire", VW / 2f, VH - 30, tp);
                   }
+              }
+
+              void drawLog(Canvas c, float x, float y, float len, float thick, float angle, float flick) {
+                  c.save();
+                  c.rotate(angle, x, y);
+                  p.setColor(0xff3e2723);
+                  rf.set(x - len / 2, y - thick / 2, x + len / 2, y + thick / 2);
+                  c.drawRoundRect(rf, thick / 2, thick / 2, p);
+                  p.setColor(0xff5d4037);
+                  rf.set(x - len / 2 + 6, y - thick / 2 + 5, x + len / 2 - 6, y - thick / 2 + 12);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  // glowing cracks
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(3);
+                  int ga = (int) (150 + flick * 60);
+                  p.setColor((Math.max(40, Math.min(255, ga)) << 24) | 0xff6d00);
+                  for (int i = 0; i < 4; i++) {
+                      float cx = x - len / 2 + len * (0.2f + i * 0.2f);
+                      c.drawLine(cx - 14, y + 4, cx + 10, y + thick / 2 - 6, p);
+                  }
+                  p.setStyle(Paint.Style.FILL);
+                  // cut end
+                  p.setColor(0xff8d6e63);
+                  c.drawOval(x + len / 2 - 14, y - thick / 2 + 2, x + len / 2 + 8, y + thick / 2 - 2, p);
+                  p.setColor(0xffa1887f);
+                  c.drawOval(x + len / 2 - 8, y - thick / 4, x + len / 2 + 2, y + thick / 4, p);
+                  c.restore();
               }
 
               // ================================================================== drawing: HUD + overlays
@@ -2529,6 +3128,55 @@ jobs:
                   }
                   addBell(out, (int) (0.05f * RATE), midi(81), 0.45f, 0.15f, false);
                   addBell(out, (int) (0.13f * RATE), midi(88), 0.45f, 0.13f, false);
+                  return out;
+              }
+
+              /**
+               * Fireplace crackle, about 7 seconds, made to loop: a low rumble, soft hiss,
+               * lots of tiny pops and the occasional big snap. Pops near the end wrap to the start.
+               */
+              static float[] crackle() {
+                  Random r = new Random(77);
+                  int n = (int) (RATE * 7.0);
+                  float[] out = new float[n];
+                  float lp = 0, lp2 = 0;
+                  for (int i = 0; i < n; i++) {
+                      float w = r.nextFloat() * 2 - 1;
+                      lp += 0.02f * (w - lp);
+                      lp2 += 0.5f * (w - lp2);
+                      float swell = 0.8f + 0.2f * (float) Math.sin(2 * Math.PI * i / n * 3);
+                      out[i] = lp * 0.9f * swell + (w - lp2) * 0.012f;
+                  }
+                  // pops: mostly tiny, a few bigger
+                  double t = 0;
+                  while (t < 7.0) {
+                      t += -Math.log(1 - r.nextDouble()) / 14.0;
+                      int at = (int) (t * RATE);
+                      float size = (float) Math.pow(r.nextFloat(), 3);
+                      int len = (int) (RATE * (0.002 + size * 0.012));
+                      float amp = 0.12f + size * 0.75f;
+                      float plp = 0;
+                      float cut = 0.3f + r.nextFloat() * 0.6f;
+                      for (int k = 0; k < len; k++) {
+                          float e = (float) Math.pow(1 - k / (float) len, 4);
+                          plp += cut * ((r.nextFloat() * 2 - 1) - plp);
+                          out[(at + k) % n] += plp * e * amp;
+                      }
+                  }
+                  // a few snaps: double crack with a woody body
+                  for (int s = 0; s < 5; s++) {
+                      int at = r.nextInt(n);
+                      for (int hit = 0; hit < 2; hit++) {
+                          int start = at + hit * (int) (RATE * (0.015 + r.nextFloat() * 0.02));
+                          int len = (int) (RATE * 0.03);
+                          for (int k = 0; k < len; k++) {
+                              float e = (float) Math.pow(1 - k / (float) len, 5);
+                              double body = Math.sin(2 * Math.PI * (700 + r.nextFloat() * 50) * k / RATE);
+                              out[(start + k) % n] += (float) ((r.nextFloat() * 2 - 1) * 0.7 + body * 0.3) * e * 0.8f;
+                          }
+                      }
+                  }
+                  normalize(out, 0.75f);
                   return out;
               }
 
