@@ -91,6 +91,8 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+              <uses-permission android:name="android.permission.INTERNET" />
+
               <uses-feature android:name="android.software.leanback" android:required="false" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
@@ -167,6 +169,7 @@ jobs:
 
           import android.app.Activity;
           import android.content.Intent;
+          import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
           import android.graphics.Bitmap;
@@ -180,6 +183,9 @@ jobs:
           import android.graphics.Shader;
           import android.graphics.Typeface;
           import android.graphics.drawable.Drawable;
+          import android.media.AudioAttributes;
+          import android.media.MediaPlayer;
+          import android.media.SoundPool;
           import android.os.Bundle;
           import android.provider.Settings;
           import android.view.InputDevice;
@@ -191,34 +197,51 @@ jobs:
           import android.view.WindowManager;
           import android.widget.Toast;
 
+          import java.io.File;
           import java.text.SimpleDateFormat;
           import java.util.ArrayList;
           import java.util.Calendar;
           import java.util.Collections;
           import java.util.HashMap;
+          import java.util.HashSet;
+          import java.util.Iterator;
           import java.util.LinkedHashMap;
           import java.util.List;
           import java.util.Locale;
           import java.util.Map;
           import java.util.Random;
+          import java.util.Set;
+          import java.util.concurrent.ConcurrentLinkedQueue;
 
           /**
            * Snow Island: a home screen you walk around.
            * Your penguin waddles around a snowy island; every app is another penguin.
-           * Walk up to one and press OK to open that app.
+           * Walk up to one and press OK to open it. OK anywhere else opens the action wheel.
            */
           public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
               // The game draws at 1280x720 and the TV scales it up. Much lighter on the chip than 4K.
               static final int VW = 1280, VH = 720;
-              // World size and the island (an ellipse in the middle of the ocean)
               static final float WW = 2400, WH = 1600, CX = 1200, CY = 800, RX = 1050, RY = 680;
-              // Big igloo in the middle
               static final float IGLOO_X = CX, IGLOO_Y = CY - 20;
+              static final float DOOR_X = IGLOO_X, DOOR_Y = IGLOO_Y + 38;
 
               static final int DOWN = 0, UP = 1, LEFT = 2, RIGHT = 3;
               static final float PLAYER_SPEED = 230f;
               static final float NEAR_DIST = 95f;
+
+              // Emotes / poses
+              static final int E_NONE = 0, E_WAVE = 1, E_DANCE = 2, E_THROW = 3, E_SLIDE = 4, E_NAP = 5,
+                      E_HOP = 6, E_FLAP = 7, E_LOOK = 8, E_SIT = 9, E_FLINCH = 10;
+
+              static final int SCENE_ISLAND = 0, SCENE_IGLOO = 1;
+              static final int OV_NONE = 0, OV_WHEEL = 1, OV_LIST = 2;
+
+              static final int SEASON_NONE = 0, SEASON_XMAS = 1, SEASON_HALLOWEEN = 2, SEASON_VALENTINE = 3, SEASON_NEWYEAR = 4;
+              static final String[] SEASON_PREF_NAMES = {"Auto", "Christmas", "Halloween", "Valentine's", "New Year", "Off"};
+
+              // Sound ids
+              static final int S_STEP = 0, S_CHIRP = 1, S_OPEN = 2, S_WHOOSH = 3, S_SPLAT = 4, S_TICK = 5, S_TOGGLE = 6, S_DOOR = 7;
 
               static final int[] SCARVES = {
                       0xffe53935, 0xff1e88e5, 0xff43a047, 0xfffdd835, 0xff8e24aa,
@@ -226,48 +249,119 @@ jobs:
                       0xff7cb342, 0xfff4511e
               };
               static final int PLAYER_SCARF = 0xffff5252;
+              static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
+
+              static final String[] WHEEL_ICONS = {"👋", "🕺", "❄️", "🐧", "💤", "🙈", "⚙️", "🎵"};
+              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Snowball", "Belly slide", "Nap", "Apps", "Island settings", "Music"};
 
               static class AppPeng {
                   String pkg, label;
                   Intent intent;
                   Bitmap icon;
-                  int scarf;
+                  int scarf, launches;
                   float hx, hy, x, y, tx, ty, wait, phase;
                   int facing = DOWN;
                   boolean moving;
+                  int emote;
+                  float emoteT, emoteDur, emoteDelay;
+                  float hitT, throwBackT;
+                  float blinkT, nextBlink = 2f;
+                  boolean placed;
+              }
+
+              static class Ball {
+                  float x, y, vx, vy, t, dur;
+                  boolean fromPlayer;
+                  AppPeng owner;
+              }
+
+              static class Part {
+                  float x, y, vx, vy, g, life, max, size;
+                  int color;
+                  String glyph;
+                  boolean world;
+              }
+
+              static class Item {
+                  String label, value;
+                  Bitmap icon;
+                  Runnable action;
+                  Item(String label, String value, Bitmap icon, Runnable action) {
+                      this.label = label; this.value = value; this.icon = icon; this.action = action;
+                  }
               }
 
               SurfaceView view;
               SurfaceHolder holder;
-              volatile boolean running;
+              volatile boolean running, destroyed;
               Thread renderThread;
               final Object lock = new Object();
 
-              // Input (written by the UI thread, read by the render thread)
+              // Input
               volatile boolean kUp, kDown, kLeft, kRight;
               volatile float axX, axY;
-              volatile boolean okPressed;
+              final ConcurrentLinkedQueue<Integer> keyQueue = new ConcurrentLinkedQueue<>();
+              static final int REPEAT_FLAG = 1 << 20;
+
+              // Settings
+              SharedPreferences prefs;
+              boolean musicOn, soundOn, weatherFx;
+              int seasonPref;
+              final Set<String> hidden = new HashSet<>();
+
+              // Scene + overlays
+              int scene = SCENE_ISLAND, pendingScene = -1;
+              float fade;            // 0..1 black fade during scene change
+              boolean fadingOut;
+              int overlay = OV_NONE;
+              int wheelSel;
+              String listTitle = "";
+              final ArrayList<Item> listItems = new ArrayList<>();
+              int listSel, listScroll;
+              Runnable listOnBack;
 
               // Player
-              float px = CX, py = CY + 120;
+              float px = CX, py = CY + 130;
+              float islandX = CX, islandY = CY + 130;
               int facing = DOWN;
               float walkPhase;
               boolean moving;
+              int pEmote;
+              float pEmoteT, pEmoteDur;
+              float idleT, nextIdle = 7f, pHitT, pBlinkT, pNextBlink = 3f;
+              float slideDX, slideDY;
+              int lastStep;
+              AppPeng lastNear;
+              String lastNearKey = "";
 
               // World
-              Bitmap world;
+              Bitmap world, room;
               volatile List<AppPeng> apps = new ArrayList<>();
+              volatile List<AppPeng> allApps = new ArrayList<>();
               final Map<String, AppPeng> byPkg = new HashMap<>();
               float[] waveX, waveY, wavePh;
-              float[] snowX, snowY, snowSpd, snowR;
-              final float[] trailX = new float[40], trailY = new float[40], trailAge = new float[40];
+              float[] flX, flY, flSpd, flR;
+              float[] stX, stY, stLen;
+              final float[] trailX = new float[60], trailY = new float[60], trailAge = new float[60];
+              final boolean[] trailSlide = new boolean[60];
               int trailHead;
               float trailDist;
+              final ArrayList<Ball> balls = new ArrayList<>();
+              final ArrayList<Part> parts = new ArrayList<>();
+              float flash, nextFirework, nextHeart, nextZ;
 
               AppPeng launching;
               float launchT;
               float time;
               long lastNs;
+
+              volatile Weather weather;
+
+              // Audio
+              SoundPool sounds;
+              final int[] soundIds = new int[8];
+              MediaPlayer music;
+              volatile boolean resumed;
 
               final Random rnd = new Random();
               final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -279,13 +373,20 @@ jobs:
               final SimpleDateFormat timeFmt = new SimpleDateFormat("h:mm", Locale.getDefault());
               final SimpleDateFormat dateFmt = new SimpleDateFormat("EEE, MMM d", Locale.getDefault());
 
-              // ------------------------------------------------------------------ lifecycle
+              // ================================================================== lifecycle
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN
                           | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  prefs = getSharedPreferences("island", MODE_PRIVATE);
+                  musicOn = prefs.getBoolean("music", true);
+                  soundOn = prefs.getBoolean("sound", true);
+                  weatherFx = prefs.getBoolean("weatherfx", true);
+                  seasonPref = prefs.getInt("season", 0);
+                  hidden.addAll(prefs.getStringSet("hidden", new HashSet<String>()));
+
                   view = new SurfaceView(this);
                   holder = view.getHolder();
                   holder.setFixedSize(VW, VH);
@@ -296,16 +397,38 @@ jobs:
 
                   tp.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
                   bakeWorld();
+                  bakeRoom();
                   initParticles();
+                  initAudio();
+                  startWeather();
               }
 
               @Override
               protected void onResume() {
                   super.onResume();
+                  resumed = true;
                   hideSystemUi();
                   kUp = kDown = kLeft = kRight = false;
                   axX = axY = 0;
                   loadApps();
+                  updateMusic();
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  resumed = false;
+                  if (music != null) {
+                      try { if (music.isPlaying()) music.pause(); } catch (Exception ignored) { }
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  destroyed = true;
+                  try { if (music != null) music.release(); } catch (Exception ignored) { }
+                  try { if (sounds != null) sounds.release(); } catch (Exception ignored) { }
               }
 
               @Override
@@ -342,36 +465,32 @@ jobs:
                   }
               }
 
-              // ------------------------------------------------------------------ input
+              // ================================================================== input
 
               @Override
               public boolean dispatchKeyEvent(KeyEvent e) {
+                  int code = e.getKeyCode();
                   boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
-                  switch (e.getKeyCode()) {
-                      case KeyEvent.KEYCODE_DPAD_UP:
-                      case KeyEvent.KEYCODE_W:
-                          kUp = down; return true;
-                      case KeyEvent.KEYCODE_DPAD_DOWN:
-                      case KeyEvent.KEYCODE_S:
-                          kDown = down; return true;
-                      case KeyEvent.KEYCODE_DPAD_LEFT:
-                      case KeyEvent.KEYCODE_A:
-                          kLeft = down; return true;
-                      case KeyEvent.KEYCODE_DPAD_RIGHT:
-                      case KeyEvent.KEYCODE_D:
-                          kRight = down; return true;
-                      case KeyEvent.KEYCODE_DPAD_CENTER:
-                      case KeyEvent.KEYCODE_ENTER:
-                      case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                      case KeyEvent.KEYCODE_BUTTON_A:
-                          if (down && e.getRepeatCount() == 0) okPressed = true;
-                          return true;
-                      case KeyEvent.KEYCODE_BACK:
-                      case KeyEvent.KEYCODE_BUTTON_B:
-                          if (!down) finish();
-                          return true;
+                  switch (code) {
+                      case KeyEvent.KEYCODE_DPAD_UP: case KeyEvent.KEYCODE_W: kUp = down; break;
+                      case KeyEvent.KEYCODE_DPAD_DOWN: case KeyEvent.KEYCODE_S: kDown = down; break;
+                      case KeyEvent.KEYCODE_DPAD_LEFT: case KeyEvent.KEYCODE_A: kLeft = down; break;
+                      case KeyEvent.KEYCODE_DPAD_RIGHT: case KeyEvent.KEYCODE_D: kRight = down; break;
+                      case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                      case KeyEvent.KEYCODE_BUTTON_A: case KeyEvent.KEYCODE_BACK: case KeyEvent.KEYCODE_BUTTON_B:
+                      case KeyEvent.KEYCODE_INFO: case KeyEvent.KEYCODE_MENU: case KeyEvent.KEYCODE_GUIDE:
+                      case KeyEvent.KEYCODE_BUTTON_Y: case KeyEvent.KEYCODE_BUTTON_START: case KeyEvent.KEYCODE_BUTTON_X:
+                      case KeyEvent.KEYCODE_BUTTON_L1: case KeyEvent.KEYCODE_BUTTON_R1:
+                          break;
+                      default:
+                          return super.dispatchKeyEvent(e);
                   }
-                  return super.dispatchKeyEvent(e);
+                  if (down) {
+                      int rep = e.getRepeatCount();
+                      if (rep == 0) keyQueue.add(code);
+                      else if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN) keyQueue.add(code | REPEAT_FLAG);
+                  }
+                  return true;
               }
 
               @Override
@@ -391,7 +510,98 @@ jobs:
                   return super.dispatchGenericMotionEvent(e);
               }
 
-              // ------------------------------------------------------------------ apps
+              // ================================================================== audio
+
+              void initAudio() {
+                  try {
+                      AudioAttributes aa = new AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_GAME)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build();
+                      sounds = new SoundPool.Builder().setMaxStreams(6).setAudioAttributes(aa).build();
+                  } catch (Exception ex) {
+                      sounds = null;
+                  }
+                  new Thread(() -> {
+                      File dir = getFilesDir();
+                      String[] names = {"step", "chirp", "open", "whoosh", "splat", "tick", "toggle", "door"};
+                      for (int i = 0; i < names.length; i++) {
+                          try {
+                              File f = new File(dir, "sfx2_" + names[i] + ".wav");
+                              if (!f.exists()) {
+                                  float[] data;
+                                  switch (i) {
+                                      case 0: data = Synth.step(); break;
+                                      case 1: data = Synth.chirp(); break;
+                                      case 2: data = Synth.open(); break;
+                                      case 3: data = Synth.whoosh(); break;
+                                      case 4: data = Synth.splat(); break;
+                                      case 5: data = Synth.tick(); break;
+                                      case 6: data = Synth.toggle(); break;
+                                      default: data = Synth.door(); break;
+                                  }
+                                  Synth.writeWav(f, data);
+                              }
+                              if (sounds != null) soundIds[i] = sounds.load(f.getAbsolutePath(), 1);
+                          } catch (Exception ignored) { }
+                      }
+                      try {
+                          File mf = new File(dir, "music2.wav");
+                          if (!mf.exists()) {
+                              File tmp = new File(dir, "music2.tmp");
+                              Synth.writeWav(tmp, Synth.music());
+                              tmp.renameTo(mf);
+                          }
+                          runOnUiThread(() -> {
+                              if (destroyed) return;
+                              try {
+                                  music = new MediaPlayer();
+                                  music.setDataSource(mf.getAbsolutePath());
+                                  music.setLooping(true);
+                                  music.setVolume(0.32f, 0.32f);
+                                  music.prepare();
+                                  updateMusic();
+                              } catch (Exception ex) {
+                                  music = null;
+                              }
+                          });
+                      } catch (Exception ignored) { }
+                  }, "island-audio").start();
+              }
+
+              void play(int id, float vol, float rate) {
+                  if (!soundOn || sounds == null || soundIds[id] == 0) return;
+                  try { sounds.play(soundIds[id], vol, vol, 1, 0, rate); } catch (Exception ignored) { }
+              }
+
+              void updateMusic() {
+                  runOnUiThread(() -> {
+                      if (music == null) return;
+                      try {
+                          if (musicOn && resumed) { if (!music.isPlaying()) music.start(); }
+                          else if (music.isPlaying()) music.pause();
+                      } catch (Exception ignored) { }
+                  });
+              }
+
+              // ================================================================== weather
+
+              void startWeather() {
+                  Thread t = new Thread(() -> {
+                      while (!destroyed) {
+                          Weather w = Weather.fetch();
+                          if (w.ok) weather = w;
+                          long wait = w.ok ? 20 * 60 * 1000L : 2 * 60 * 1000L;
+                          long until = System.currentTimeMillis() + wait;
+                          while (!destroyed && System.currentTimeMillis() < until) {
+                              try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
+                          }
+                      }
+                  }, "island-weather");
+                  t.setDaemon(true);
+                  t.start();
+              }
+
+              // ================================================================== apps
 
               void loadApps() {
                   new Thread(() -> {
@@ -419,55 +629,55 @@ jobs:
                               }
                               a.intent = li;
                               try { a.icon = toBitmap(ri.loadIcon(pm), 72); } catch (Exception ex) { a.icon = null; }
+                              a.launches = prefs.getInt("n_" + pk, 0);
+                              a.scarf = SCARVES[(pk.hashCode() & 0x7fffffff) % SCARVES.length];
                               found.put(pk, a);
                           }
                       }
-                      AppPeng s = new AppPeng();
-                      s.pkg = "__settings";
-                      s.label = "Settings";
-                      s.intent = new Intent(Settings.ACTION_SETTINGS);
-                      s.icon = makeGearIcon(72);
-                      found.put(s.pkg, s);
-
-                      List<AppPeng> list = new ArrayList<>(found.values());
-                      Collections.sort(list, (a, b) -> a.label.compareToIgnoreCase(b.label));
-                      layoutApps(list);
+                      List<AppPeng> all = new ArrayList<>(found.values());
+                      Collections.sort(all, (a, b) -> a.label.compareToIgnoreCase(b.label));
                       synchronized (lock) {
-                          for (AppPeng a : list) {
-                              AppPeng old = byPkg.get(a.pkg);
-                              if (old != null && old.hx == a.hx && old.hy == a.hy) {
-                                  a.x = old.x; a.y = old.y; a.tx = old.tx; a.ty = old.ty;
-                                  a.facing = old.facing; a.phase = old.phase;
-                              }
-                          }
-                          byPkg.clear();
-                          for (AppPeng a : list) byPkg.put(a.pkg, a);
-                          apps = list;
+                          allApps = all;
+                          relayout();
                       }
                   }, "island-apps").start();
               }
 
-              /** Places app penguins on rings around the igloo. Same app list = same spots every time. */
-              void layoutApps(List<AppPeng> list) {
-                  float[] ring = {0.30f, 0.50f, 0.67f, 0.81f};
+              /** Builds the visible list: hidden apps removed, most-used apps closest to the igloo. Call with lock held. */
+              void relayout() {
+                  List<AppPeng> vis = new ArrayList<>();
+                  for (AppPeng a : allApps) if (!hidden.contains(a.pkg)) vis.add(a);
+                  Collections.sort(vis, (a, b) -> a.launches != b.launches
+                          ? Integer.compare(b.launches, a.launches) : a.label.compareToIgnoreCase(b.label));
+                  float[] ring = {0.30f, 0.50f, 0.68f, 0.82f};
                   int[] cap = {6, 10, 14, 1000};
-                  int idx = 0, n = list.size();
+                  int idx = 0, n = vis.size();
                   Random r = new Random(42);
                   for (int k = 0; k < ring.length && idx < n; k++) {
                       int count = Math.min(cap[k], n - idx);
                       double offset = Math.PI / count * 0.5 + k * 0.45;
                       for (int j = 0; j < count; j++, idx++) {
-                          AppPeng a = list.get(idx);
+                          AppPeng a = vis.get(idx);
                           double ang = offset + 2 * Math.PI * j / count;
-                          a.hx = CX + (float) Math.cos(ang) * RX * ring[k];
-                          a.hy = CY + (float) Math.sin(ang) * RY * ring[k];
-                          a.x = a.tx = a.hx;
-                          a.y = a.ty = a.hy;
-                          a.wait = r.nextFloat() * 3f;
-                          a.phase = r.nextFloat() * 6f;
-                          a.scarf = SCARVES[(a.pkg.hashCode() & 0x7fffffff) % SCARVES.length];
+                          float nhx = CX + (float) Math.cos(ang) * RX * ring[k];
+                          float nhy = CY + (float) Math.sin(ang) * RY * ring[k];
+                          AppPeng old = byPkg.get(a.pkg);
+                          if (old != null && old != a && old.placed) {
+                              a.x = old.x; a.y = old.y; a.facing = old.facing; a.phase = old.phase;
+                              a.placed = true;
+                          } else if (!a.placed) {
+                              a.x = nhx; a.y = nhy; a.phase = r.nextFloat() * 6f;
+                              a.placed = true;
+                          }
+                          if (old == null || Math.abs(nhx - a.hx) > 1 || Math.abs(nhy - a.hy) > 1) {
+                              a.tx = nhx; a.ty = nhy; a.wait = 0;
+                          }
+                          a.hx = nhx; a.hy = nhy;
                       }
                   }
+                  byPkg.clear();
+                  for (AppPeng a : allApps) byPkg.put(a.pkg, a);
+                  apps = vis;
               }
 
               Bitmap toBitmap(Drawable d, int size) {
@@ -478,37 +688,42 @@ jobs:
                   return b;
               }
 
-              Bitmap makeGearIcon(int size) {
-                  Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-                  Canvas c = new Canvas(b);
-                  Paint g = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  float m = size / 2f;
-                  g.setColor(0xff546e7a);
-                  for (int i = 0; i < 8; i++) {
-                      c.save();
-                      c.rotate(i * 45f, m, m);
-                      c.drawRect(m - size * 0.08f, m - size * 0.44f, m + size * 0.08f, m - size * 0.2f, g);
-                      c.restore();
-                  }
-                  c.drawCircle(m, m, size * 0.3f, g);
-                  g.setColor(0xffffffff);
-                  c.drawCircle(m, m, size * 0.12f, g);
-                  return b;
+              void launch(AppPeng a) {
+                  a.launches++;
+                  prefs.edit().putInt("n_" + a.pkg, a.launches).apply();
+                  startIntent(a.intent, a.label);
               }
 
-              void launch(AppPeng a) {
+              void startIntent(Intent intent, String label) {
                   runOnUiThread(() -> {
                       try {
-                          Intent i = new Intent(a.intent);
+                          Intent i = new Intent(intent);
                           i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                           startActivity(i);
                       } catch (Exception ex) {
-                          Toast.makeText(this, "Couldn't open " + a.label, Toast.LENGTH_SHORT).show();
+                          Toast.makeText(this, "Couldn't open " + label, Toast.LENGTH_SHORT).show();
                       }
                   });
               }
 
-              // ------------------------------------------------------------------ world (drawn once)
+              // ================================================================== seasons
+
+              int activeSeason() {
+                  if (seasonPref == 1) return SEASON_XMAS;
+                  if (seasonPref == 2) return SEASON_HALLOWEEN;
+                  if (seasonPref == 3) return SEASON_VALENTINE;
+                  if (seasonPref == 4) return SEASON_NEWYEAR;
+                  if (seasonPref == 5) return SEASON_NONE;
+                  Calendar cal = Calendar.getInstance();
+                  int m = cal.get(Calendar.MONTH), d = cal.get(Calendar.DAY_OF_MONTH), h = cal.get(Calendar.HOUR_OF_DAY);
+                  if (m == Calendar.OCTOBER && d >= 15) return SEASON_HALLOWEEN;
+                  if ((m == Calendar.DECEMBER && d == 31 && h >= 18) || (m == Calendar.JANUARY && d == 1)) return SEASON_NEWYEAR;
+                  if (m == Calendar.DECEMBER || (m == Calendar.JANUARY && d <= 6)) return SEASON_XMAS;
+                  if (m == Calendar.FEBRUARY && d >= 7 && d <= 14) return SEASON_VALENTINE;
+                  return SEASON_NONE;
+              }
+
+              // ================================================================== baked art
 
               void bakeWorld() {
                   world = Bitmap.createBitmap((int) WW, (int) WH, Bitmap.Config.RGB_565);
@@ -516,29 +731,23 @@ jobs:
                   Paint w = new Paint(Paint.ANTI_ALIAS_FLAG);
                   Random r = new Random(7);
 
-                  // Ocean
                   w.setShader(new LinearGradient(0, 0, 0, WH, 0xff2f78b8, 0xff123f6c, Shader.TileMode.CLAMP));
                   c.drawRect(0, 0, WW, WH, w);
                   w.setShader(null);
-                  // Shallow water + ice shelf
                   w.setColor(0xff4a97cf);
                   c.drawOval(CX - RX - 70, CY - RY - 55, CX + RX + 70, CY + RY + 55, w);
                   w.setColor(0xffcfe7f4);
                   c.drawOval(CX - RX - 20, CY - RY - 16, CX + RX + 20, CY + RY + 16, w);
-                  // Snow
                   w.setShader(new RadialGradient(CX, CY - 80, RX, 0xffffffff, 0xffe3eff7, Shader.TileMode.CLAMP));
                   c.drawOval(CX - RX, CY - RY, CX + RX, CY + RY, w);
                   w.setShader(null);
 
-                  // Soft snow drifts
                   w.setColor(0xffe6f0f7);
                   for (int i = 0; i < 55; i++) {
                       float[] pt = randomOnIsland(r, 0.1f, 0.9f);
                       float dw = 50 + r.nextFloat() * 110, dh = 14 + r.nextFloat() * 26;
                       c.drawOval(pt[0] - dw, pt[1] - dh, pt[0] + dw, pt[1] + dh, w);
                   }
-
-                  // Rocks on the ice shelf
                   for (int i = 0; i < 26; i++) {
                       float[] pt = randomOnIsland(r, 0.97f, 1.015f);
                       float s = 0.6f + r.nextFloat() * 0.9f;
@@ -547,8 +756,6 @@ jobs:
                       w.setColor(0xffffffff);
                       c.drawOval(pt[0] - 12 * s, pt[1] - 12 * s, pt[0] + 8 * s, pt[1] - 4 * s, w);
                   }
-
-                  // Trees and snowmen around the edge, drawn back-to-front
                   ArrayList<float[]> things = new ArrayList<>();
                   for (int i = 0; i < 70; i++) {
                       float[] pt = randomOnIsland(r, 0.88f, 0.97f);
@@ -563,7 +770,6 @@ jobs:
                       if (t[3] == 0) drawTree(c, w, t[0], t[1], t[2]);
                       else drawSnowman(c, w, t[0], t[1]);
                   }
-
                   drawIgloo(c, w, IGLOO_X, IGLOO_Y);
               }
 
@@ -584,17 +790,12 @@ jobs:
                   for (int i = 0; i < 3; i++) {
                       float hw = widths[i] * s, h = heights[i] * s;
                       path.reset();
-                      path.moveTo(x - hw, base);
-                      path.lineTo(x + hw, base);
-                      path.lineTo(x, base - h);
-                      path.close();
+                      path.moveTo(x - hw, base); path.lineTo(x + hw, base); path.lineTo(x, base - h); path.close();
                       w.setColor(i == 1 ? 0xff357a54 : 0xff2e6b4a);
                       c.drawPath(path, w);
                       path.reset();
-                      path.moveTo(x - hw * 0.45f, base - h * 0.55f);
-                      path.lineTo(x + hw * 0.45f, base - h * 0.55f);
-                      path.lineTo(x, base - h);
-                      path.close();
+                      path.moveTo(x - hw * 0.45f, base - h * 0.55f); path.lineTo(x + hw * 0.45f, base - h * 0.55f);
+                      path.lineTo(x, base - h); path.close();
                       w.setColor(0xfff7fbff);
                       c.drawPath(path, w);
                       base -= h * 0.55f;
@@ -614,10 +815,7 @@ jobs:
                   c.drawCircle(x, y - 16, 2, w);
                   w.setColor(0xffff7043);
                   path.reset();
-                  path.moveTo(x, y - 50);
-                  path.lineTo(x + 12, y - 47);
-                  path.lineTo(x, y - 45);
-                  path.close();
+                  path.moveTo(x, y - 50); path.lineTo(x + 12, y - 47); path.lineTo(x, y - 45); path.close();
                   c.drawPath(path, w);
               }
 
@@ -625,11 +823,9 @@ jobs:
                   w.setStyle(Paint.Style.FILL);
                   w.setColor(0x26000000);
                   c.drawOval(x - 140, y - 22, x + 140, y + 22, w);
-                  // Dome
                   rf.set(x - 125, y - 125, x + 125, y + 125);
                   w.setColor(0xfffbfdff);
                   c.drawArc(rf, 180, 180, true, w);
-                  // Ice block lines
                   w.setStyle(Paint.Style.STROKE);
                   w.setStrokeWidth(2.5f);
                   w.setColor(0xffb7d2e4);
@@ -644,7 +840,6 @@ jobs:
                           if (bx > x - half + 4 && bx < x + half - 4) c.drawLine(bx, ly, bx, ly + 25, w);
                       }
                   }
-                  // Tunnel entrance
                   w.setStyle(Paint.Style.FILL);
                   rf.set(x - 48, y - 58, x + 48, y + 38);
                   w.setColor(0xffffffff);
@@ -659,6 +854,115 @@ jobs:
                   w.setStrokeWidth(0);
               }
 
+              /** Inside the igloo. Drawn once; the fire is animated on top. */
+              void bakeRoom() {
+                  room = Bitmap.createBitmap(VW, VH, Bitmap.Config.RGB_565);
+                  Canvas c = new Canvas(room);
+                  Paint w = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  // Ice walls
+                  w.setShader(new LinearGradient(0, 0, 0, VH, 0xffd8ecf7, 0xffa9cde2, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 0, VW, VH, w);
+                  w.setShader(null);
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setStrokeWidth(2);
+                  w.setColor(0xff9cc3da);
+                  for (int row = 0; row < 6; row++) {
+                      float y = 30 + row * 42;
+                      c.drawLine(0, y, VW, y, w);
+                      for (int b = 0; b < 14; b++) {
+                          float x = b * 100 + (row % 2) * 50;
+                          c.drawLine(x, y, x, y + 42, w);
+                      }
+                  }
+                  w.setStyle(Paint.Style.FILL);
+                  // Floor
+                  w.setShader(new LinearGradient(0, 270, 0, VH, 0xfff4f8fb, 0xffdde9f1, Shader.TileMode.CLAMP));
+                  rf.set(-60, 270, VW + 60, VH + 200);
+                  c.drawOval(rf, w);
+                  w.setShader(null);
+                  // Rug
+                  w.setColor(0xffb23a48);
+                  c.drawOval(640 - 260, 420, 640 + 260, 600, w);
+                  w.setColor(0xffe0a458);
+                  c.drawOval(640 - 220, 440, 640 + 220, 580, w);
+                  w.setColor(0xff7b2d43);
+                  c.drawOval(640 - 170, 458, 640 + 170, 562, w);
+                  w.setColor(0xfff2d0a4);
+                  c.drawOval(640 - 110, 478, 640 + 110, 542, w);
+                  // Fireplace (stone)
+                  w.setColor(0xff78909c);
+                  rf.set(520, 120, 760, 300);
+                  c.drawRoundRect(rf, 14, 14, w);
+                  w.setColor(0xff90a4ae);
+                  for (int i = 0; i < 9; i++) {
+                      float sx = 530 + (i % 3) * 78, sy = 130 + (i / 3) * 55;
+                      rf.set(sx, sy, sx + 66, sy + 44);
+                      c.drawRoundRect(rf, 8, 8, w);
+                  }
+                  w.setColor(0xff5d4037);
+                  rf.set(500, 108, 780, 128);
+                  c.drawRoundRect(rf, 6, 6, w);
+                  w.setColor(0xff1c1c1c);
+                  rf.set(570, 190, 710, 300);
+                  c.drawArc(rf, 180, 180, true, w);
+                  c.drawRect(570, 245, 710, 300, w);
+                  // Logs
+                  w.setColor(0xff6d4c41);
+                  rf.set(588, 280, 692, 296);
+                  c.drawRoundRect(rf, 8, 8, w);
+                  // TV Settings console (left)
+                  w.setColor(0x33000000);
+                  c.drawOval(170, 395, 350, 425, w);
+                  w.setColor(0xff5d4037);
+                  c.drawRect(190, 330, 330, 410, w);
+                  w.setColor(0xff37474f);
+                  rf.set(175, 210, 345, 335);
+                  c.drawRoundRect(rf, 16, 16, w);
+                  w.setColor(0xff4fc3f7);
+                  rf.set(190, 225, 330, 320);
+                  c.drawRoundRect(rf, 10, 10, w);
+                  w.setColor(0xffffffff);
+                  for (int i = 0; i < 8; i++) {
+                      c.save();
+                      c.rotate(i * 45f, 260, 272);
+                      c.drawRect(254, 240, 266, 254, w);
+                      c.restore();
+                  }
+                  c.drawCircle(260, 272, 24, w);
+                  w.setColor(0xff4fc3f7);
+                  c.drawCircle(260, 272, 10, w);
+                  // Bookshelf (right)
+                  w.setColor(0x33000000);
+                  c.drawOval(930, 405, 1110, 430, w);
+                  w.setColor(0xff6d4c41);
+                  c.drawRect(940, 200, 1100, 415, w);
+                  w.setColor(0xff4e342e);
+                  int[] bookCols = {0xffe53935, 0xff1e88e5, 0xff43a047, 0xfffdd835, 0xff8e24aa, 0xfffb8c00};
+                  for (int shelf = 0; shelf < 3; shelf++) {
+                      float sy = 210 + shelf * 68;
+                      w.setColor(0xff4e342e);
+                      c.drawRect(948, sy, 1092, sy + 60, w);
+                      float bx = 952;
+                      Random r = new Random(shelf * 31 + 5);
+                      while (bx < 1080) {
+                          float bw = 12 + r.nextInt(10);
+                          float bh = 38 + r.nextInt(18);
+                          w.setColor(bookCols[r.nextInt(bookCols.length)]);
+                          c.drawRect(bx, sy + 60 - bh, bx + bw, sy + 60, w);
+                          bx += bw + 3;
+                      }
+                  }
+                  // Cushions by the fire
+                  w.setColor(0xff26a69a);
+                  c.drawOval(430, 330, 520, 365, w);
+                  w.setColor(0xffffb74d);
+                  c.drawOval(760, 330, 850, 365, w);
+                  // Doorway
+                  w.setColor(0xff2c3e50);
+                  rf.set(560, 640, 720, 800);
+                  c.drawArc(rf, 180, 180, true, w);
+              }
+
               void initParticles() {
                   Random r = new Random(3);
                   int nw = 0;
@@ -670,17 +974,24 @@ jobs:
                       waveX[nw] = x; waveY[nw] = y; wavePh[nw] = r.nextFloat() * 6.28f;
                       nw++;
                   }
-                  int ns = 110;
-                  snowX = new float[ns]; snowY = new float[ns]; snowSpd = new float[ns]; snowR = new float[ns];
+                  int ns = 240;
+                  flX = new float[ns]; flY = new float[ns]; flSpd = new float[ns]; flR = new float[ns];
                   for (int i = 0; i < ns; i++) {
-                      snowX[i] = r.nextFloat() * VW;
-                      snowY[i] = r.nextFloat() * VH;
-                      snowSpd[i] = 25 + r.nextFloat() * 45;
-                      snowR[i] = 1.2f + r.nextFloat() * 2f;
+                      flX[i] = r.nextFloat() * VW;
+                      flY[i] = r.nextFloat() * VH;
+                      flSpd[i] = 0.6f + r.nextFloat() * 0.8f;
+                      flR[i] = 1.2f + r.nextFloat() * 2f;
+                  }
+                  int nst = 45;
+                  stX = new float[nst]; stY = new float[nst]; stLen = new float[nst];
+                  for (int i = 0; i < nst; i++) {
+                      stX[i] = r.nextFloat() * VW;
+                      stY[i] = r.nextFloat() * VH;
+                      stLen[i] = 25 + r.nextFloat() * 45;
                   }
               }
 
-              // ------------------------------------------------------------------ loop
+              // ================================================================== main loop
 
               void renderLoop() {
                   while (running) {
@@ -701,91 +1012,243 @@ jobs:
                           List<AppPeng> list;
                           synchronized (lock) { list = apps; }
                           update(dt, list);
-                          draw(c, list);
+                          if (scene == SCENE_ISLAND) drawIsland(c, list);
+                          else drawRoom(c);
+                          drawOverlays(c);
+                      } catch (Exception ex) {
+                          // keep the loop alive no matter what
                       } finally {
                           try { holder.unlockCanvasAndPost(c); } catch (Exception ignored) { }
                       }
                   }
               }
 
-              AppPeng nearest(List<AppPeng> list) {
-                  AppPeng best = null;
-                  float bd = NEAR_DIST * NEAR_DIST;
-                  for (AppPeng a : list) {
-                      float dx = a.x - px, dy = a.y - py;
-                      float d = dx * dx + dy * dy;
-                      if (d < bd) { bd = d; best = a; }
-                  }
-                  return best;
-              }
+              // ================================================================== update
 
               void update(float dt, List<AppPeng> list) {
-                  // Launch animation: a little hop, then open the app
+                  // Scene fade
+                  if (pendingScene >= 0) {
+                      if (fadingOut) {
+                          fade = Math.min(1, fade + dt * 4);
+                          if (fade >= 1) { enterScene(pendingScene); fadingOut = false; }
+                      } else {
+                          fade = Math.max(0, fade - dt * 4);
+                          if (fade <= 0) pendingScene = -1;
+                      }
+                  }
+
+                  Integer k;
+                  while ((k = keyQueue.poll()) != null) handleKey(k & ~REPEAT_FLAG, (k & REPEAT_FLAG) != 0, list);
+
+                  boolean inputHeld = kUp || kDown || kLeft || kRight || axX != 0 || axY != 0;
+                  boolean frozen = overlay != OV_NONE || pendingScene >= 0 || launching != null;
+
                   if (launching != null) {
                       launchT += dt;
-                      if (launchT > 0.35f) {
-                          launch(launching);
-                          launching = null;
+                      if (launchT > 0.35f) { launch(launching); launching = null; }
+                  }
+
+                  // Player emotes
+                  if (pEmote != E_NONE) {
+                      pEmoteT += dt;
+                      if (pEmote == E_THROW && pEmoteT >= 0.12f && pEmoteT - dt < 0.12f) throwBall(true, null, px, py, facing);
+                      if (pEmote == E_DANCE && rnd.nextFloat() < dt * 3) spawnNote(px, py - 95);
+                      if (pEmote == E_NAP) {
+                          nextZ -= dt;
+                          if (nextZ <= 0) { nextZ = 1.2f; spawnZ(px + 12, py - 70); }
                       }
-                      okPressed = false;
-                      moving = false;
-                  } else {
-                      float dx = (kRight ? 1 : 0) - (kLeft ? 1 : 0) + axX;
-                      float dy = (kDown ? 1 : 0) - (kUp ? 1 : 0) + axY;
-                      float len = (float) Math.sqrt(dx * dx + dy * dy);
-                      moving = len > 0.2f;
-                      if (moving) {
-                          if (len > 1) { dx /= len; dy /= len; }
-                          float nx = px + dx * PLAYER_SPEED * dt;
-                          float ny = py + dy * PLAYER_SPEED * dt;
-                          // Stay on the island
-                          float ex = (nx - CX) / (RX - 35), ey = (ny - CY) / (RY - 30);
-                          float e = ex * ex + ey * ey;
-                          if (e > 1) {
-                              float k = (float) (1 / Math.sqrt(e));
-                              nx = CX + (nx - CX) * k;
-                              ny = CY + (ny - CY) * k;
+                      boolean ends = pEmoteDur > 0 && pEmoteT >= pEmoteDur;
+                      boolean cancel = (pEmote == E_NAP || pEmote == E_SIT || pEmote == E_LOOK) && inputHeld && !frozen;
+                      if (ends || cancel) pEmote = E_NONE;
+                  }
+
+                  moving = false;
+                  if (!frozen) {
+                      if (pEmote == E_SLIDE) {
+                          movePlayer(slideDX, slideDY, 520, dt, true);
+                          moving = true;
+                      } else if (pEmote == E_NONE || pEmote == E_LOOK) {
+                          float dx = (kRight ? 1 : 0) - (kLeft ? 1 : 0) + axX;
+                          float dy = (kDown ? 1 : 0) - (kUp ? 1 : 0) + axY;
+                          float len = (float) Math.sqrt(dx * dx + dy * dy);
+                          if (len > 0.2f) {
+                              if (len > 1) { dx /= len; dy /= len; }
+                              movePlayer(dx, dy, PLAYER_SPEED, dt, false);
+                              moving = true;
+                              if (Math.abs(dx) > Math.abs(dy)) facing = dx < 0 ? LEFT : RIGHT;
+                              else facing = dy < 0 ? UP : DOWN;
                           }
-                          // Don't walk through the igloo
-                          float ix = (nx - IGLOO_X) / 140f, iy = (ny - (IGLOO_Y - 30)) / 55f;
-                          float ie = ix * ix + iy * iy;
-                          if (ie < 1) {
-                              float k = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f)));
-                              nx = IGLOO_X + (nx - IGLOO_X) * k;
-                              ny = (IGLOO_Y - 30) + (ny - (IGLOO_Y - 30)) * k;
-                          }
-                          trailDist += Math.abs(nx - px) + Math.abs(ny - py);
-                          px = nx;
-                          py = ny;
-                          if (Math.abs(dx) > Math.abs(dy)) facing = dx < 0 ? LEFT : RIGHT;
-                          else facing = dy < 0 ? UP : DOWN;
-                          if (trailDist > 16) {
-                              trailDist = 0;
-                              trailHead = (trailHead + 1) % trailX.length;
-                              trailX[trailHead] = px + (trailHead % 2 == 0 ? -6 : 6);
-                              trailY[trailHead] = py;
-                              trailAge[trailHead] = 0.001f;
-                          }
-                      }
-                      if (okPressed) {
-                          okPressed = false;
-                          AppPeng a = nearest(list);
-                          if (a != null) { launching = a; launchT = 0; }
                       }
                   }
                   walkPhase += dt * (moving ? 14f : 3f);
+                  if (moving && pEmote != E_SLIDE) {
+                      int stepNow = (int) (walkPhase / Math.PI);
+                      if (stepNow != lastStep) {
+                          lastStep = stepNow;
+                          play(S_STEP, scene == SCENE_ISLAND ? 0.35f : 0.25f, 0.85f + rnd.nextFloat() * 0.3f);
+                      }
+                  }
+
+                  // Idle animations
+                  if (inputHeld || pEmote != E_NONE || frozen) {
+                      if (inputHeld) idleT = 0;
+                  } else {
+                      idleT += dt;
+                      if (idleT > 40 && scene == SCENE_ISLAND) {
+                          startEmote(E_NAP, 0);
+                      } else if (idleT > nextIdle) {
+                          nextIdle = idleT + 4 + rnd.nextFloat() * 4;
+                          int pick = rnd.nextInt(3);
+                          if (pick == 0) { startEmote(E_LOOK, 1.6f); }
+                          else if (pick == 1) startEmote(E_FLAP, 0.8f);
+                          else startEmote(E_HOP, 0.6f);
+                      }
+                  }
+                  if (idleT == 0) nextIdle = 7f;
+
+                  pHitT = Math.max(0, pHitT - dt);
+                  pNextBlink -= dt;
+                  if (pNextBlink <= 0) { pBlinkT = 0.13f; pNextBlink = 2 + rnd.nextFloat() * 4; }
+                  pBlinkT = Math.max(0, pBlinkT - dt);
+
                   for (int i = 0; i < trailAge.length; i++) if (trailAge[i] > 0) trailAge[i] += dt;
 
-                  // App penguins wander near their spot, and stop to look at you when you come close
+                  if (scene == SCENE_ISLAND) updateIsland(dt, list);
+
+                  // "Say hi" chirp when a new thing comes into reach
+                  String nk = "";
+                  AppPeng near = scene == SCENE_ISLAND ? nearestApp(list) : null;
+                  if (near != null) nk = near.pkg;
+                  else {
+                      String obj = nearObject();
+                      if (obj != null) nk = obj;
+                  }
+                  if (!nk.equals(lastNearKey)) {
+                      if (near != null) play(S_CHIRP, 0.4f, 0.85f + (near.pkg.hashCode() & 7) * 0.05f);
+                      lastNearKey = nk;
+                  }
+
+                  updateParticles(dt);
+              }
+
+              void movePlayer(float dx, float dy, float speed, float dt, boolean slide) {
+                  float nx = px + dx * speed * dt;
+                  float ny = py + dy * speed * dt;
+                  if (scene == SCENE_ISLAND) {
+                      float ex = (nx - CX) / (RX - 35), ey = (ny - CY) / (RY - 30);
+                      float e = ex * ex + ey * ey;
+                      if (e > 1) {
+                          float kk = (float) (1 / Math.sqrt(e));
+                          nx = CX + (nx - CX) * kk;
+                          ny = CY + (ny - CY) * kk;
+                      }
+                      float ix = (nx - IGLOO_X) / 140f, iy = (ny - (IGLOO_Y - 35)) / 58f;
+                      float ie = ix * ix + iy * iy;
+                      if (ie < 1) {
+                          float kk = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f)));
+                          nx = IGLOO_X + (nx - IGLOO_X) * kk;
+                          ny = (IGLOO_Y - 35) + (ny - (IGLOO_Y - 35)) * kk;
+                      }
+                  } else {
+                      nx = Math.max(170, Math.min(1110, nx));
+                      ny = Math.max(380, Math.min(660, ny));
+                      // furniture
+                      if (ny < 440 && nx > 160 && nx < 360) ny = 440;
+                      if (ny < 440 && nx > 920 && nx < 1120) ny = 440;
+                  }
+                  float moved = Math.abs(nx - px) + Math.abs(ny - py);
+                  px = nx;
+                  py = ny;
+                  trailDist += moved;
+                  if (scene == SCENE_ISLAND && trailDist > (slide ? 7 : 16)) {
+                      trailDist = 0;
+                      trailHead = (trailHead + 1) % trailX.length;
+                      trailX[trailHead] = px + (slide ? 0 : (trailHead % 2 == 0 ? -6 : 6));
+                      trailY[trailHead] = py;
+                      trailAge[trailHead] = 0.001f;
+                      trailSlide[trailHead] = slide;
+                  }
+              }
+
+              void startEmote(int e, float dur) {
+                  pEmote = e;
+                  pEmoteT = 0;
+                  pEmoteDur = dur;
+                  switch (e) {
+                      case E_WAVE:
+                          facing = DOWN;
+                          if (scene == SCENE_ISLAND) for (AppPeng a : apps) {
+                              if (dist2(a.x, a.y, px, py) < 320 * 320) npcEmote(a, E_WAVE, 1.4f, 0.3f + rnd.nextFloat() * 0.4f);
+                          }
+                          play(S_CHIRP, 0.45f, 1.1f);
+                          break;
+                      case E_DANCE:
+                          if (scene == SCENE_ISLAND) for (AppPeng a : apps) {
+                              if (dist2(a.x, a.y, px, py) < 280 * 280) npcEmote(a, E_DANCE, 3.2f, 0.2f + rnd.nextFloat() * 0.5f);
+                          }
+                          break;
+                      case E_SLIDE:
+                          slideDX = facing == LEFT ? -1 : facing == RIGHT ? 1 : 0;
+                          slideDY = facing == UP ? -1 : facing == DOWN ? 1 : 0;
+                          play(S_WHOOSH, 0.5f, 0.8f);
+                          break;
+                      case E_THROW:
+                          play(S_WHOOSH, 0.45f, 1.3f);
+                          break;
+                      case E_LOOK:
+                          break;
+                      default:
+                          break;
+                  }
+              }
+
+              void npcEmote(AppPeng a, int e, float dur, float delay) {
+                  a.emote = e;
+                  a.emoteT = 0;
+                  a.emoteDur = dur;
+                  a.emoteDelay = delay;
+              }
+
+              void updateIsland(float dt, List<AppPeng> list) {
                   for (AppPeng a : list) {
-                      float pdx = px - a.x, pdy = py - a.y;
-                      if (pdx * pdx + pdy * pdy < 130 * 130) {
+                      a.hitT = Math.max(0, a.hitT - dt);
+                      a.nextBlink -= dt;
+                      if (a.nextBlink <= 0) { a.blinkT = 0.13f; a.nextBlink = 2 + rnd.nextFloat() * 5; }
+                      a.blinkT = Math.max(0, a.blinkT - dt);
+
+                      if (a.throwBackT > 0) {
+                          a.throwBackT -= dt;
+                          if (a.throwBackT <= 0) {
+                              a.facing = faceToward(a.x, a.y, px, py);
+                              npcEmote(a, E_THROW, 0.45f, 0);
+                              throwBall(false, a, a.x, a.y, a.facing);
+                          }
+                      }
+
+                      if (a.emote != E_NONE) {
+                          if (a.emoteDelay > 0) {
+                              a.emoteDelay -= dt;
+                              if (a.emote == E_WAVE || a.emote == E_DANCE) a.facing = faceToward(a.x, a.y, px, py);
+                          } else {
+                              a.emoteT += dt;
+                              if (a.emote == E_DANCE) {
+                                  a.facing = ((int) (a.emoteT / 0.2f)) % 4;
+                              }
+                              if (a.emoteT >= a.emoteDur) a.emote = E_NONE;
+                          }
                           a.moving = false;
-                          if (Math.abs(pdx) > Math.abs(pdy)) a.facing = pdx < 0 ? LEFT : RIGHT;
-                          else a.facing = pdy < 0 ? UP : DOWN;
+                          a.phase += dt * 3;
+                          continue;
+                      }
+
+                      float pdx = px - a.x, pdy = py - a.y;
+                      if (pdx * pdx + pdy * pdy < 130 * 130 && scene == SCENE_ISLAND) {
+                          a.moving = false;
+                          a.facing = faceToward(a.x, a.y, px, py);
                       } else if (a.wait > 0) {
                           a.wait -= dt;
                           a.moving = false;
+                          if (rnd.nextFloat() < dt * 0.06f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
                       } else {
                           float dx = a.tx - a.x, dy = a.ty - a.y;
                           float d = (float) Math.sqrt(dx * dx + dy * dy);
@@ -795,31 +1258,458 @@ jobs:
                               a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
                               a.moving = false;
                           } else {
-                              float step = Math.min(d, 32f * dt);
-                              a.x += dx / d * step;
-                              a.y += dy / d * step;
+                              float speed = d > 150 ? 110f : 32f;
+                              float stepLen = Math.min(d, speed * dt);
+                              a.x += dx / d * stepLen;
+                              a.y += dy / d * stepLen;
                               a.moving = true;
-                              if (Math.abs(dx) > Math.abs(dy)) a.facing = dx < 0 ? LEFT : RIGHT;
-                              else a.facing = dy < 0 ? UP : DOWN;
+                              a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
                           }
                       }
                       a.phase += dt * (a.moving ? 10f : 3f);
                   }
 
-                  for (int i = 0; i < snowX.length; i++) {
-                      snowY[i] += snowSpd[i] * dt;
-                      snowX[i] += (float) Math.sin(time * 0.8f + i) * 12f * dt;
-                      if (snowY[i] > VH + 5) { snowY[i] = -5; snowX[i] = rnd.nextFloat() * VW; }
-                      if (snowX[i] < -5) snowX[i] = VW + 5;
-                      if (snowX[i] > VW + 5) snowX[i] = -5;
+                  // Snowballs
+                  for (Iterator<Ball> it = balls.iterator(); it.hasNext(); ) {
+                      Ball b = it.next();
+                      b.t += dt;
+                      b.x += b.vx * dt;
+                      b.y += b.vy * dt;
+                      float z = ballZ(b);
+                      boolean done = false;
+                      if (b.fromPlayer) {
+                          for (AppPeng a : list) {
+                              if (z < 75 && dist2(a.x, a.y - 10, b.x, b.y) < 30 * 30) {
+                                  a.hitT = 2.2f;
+                                  a.facing = faceToward(a.x, a.y, px, py);
+                                  npcEmote(a, E_FLINCH, 0.5f, 0);
+                                  play(S_SPLAT, 0.6f, 1f);
+                                  play(S_CHIRP, 0.45f, 1.35f);
+                                  if (rnd.nextFloat() < 0.6f) a.throwBackT = 0.9f + rnd.nextFloat() * 0.5f;
+                                  splat(b.x, b.y - z * 0.3f - 40);
+                                  done = true;
+                                  break;
+                              }
+                          }
+                      } else if (z < 75 && dist2(px, py - 10, b.x, b.y) < 30 * 30) {
+                          pHitT = 2.2f;
+                          play(S_SPLAT, 0.6f, 0.9f);
+                          splat(b.x, b.y - 45);
+                          done = true;
+                      }
+                      if (!done && b.t >= b.dur) {
+                          float ex = (b.x - CX) / RX, ey = (b.y - CY) / RY;
+                          if (ex * ex + ey * ey > 1) splash(b.x, b.y); else splat(b.x, b.y);
+                          play(S_SPLAT, 0.35f, 1.2f);
+                          done = true;
+                      }
+                      if (done) it.remove();
+                  }
+
+                  // Seasonal extras
+                  int season = activeSeason();
+                  if (season == SEASON_NEWYEAR) {
+                      nextFirework -= dt;
+                      if (nextFirework <= 0) { nextFirework = 0.6f + rnd.nextFloat() * 1.2f; firework(); }
+                  } else if (season == SEASON_VALENTINE) {
+                      nextHeart -= dt;
+                      if (nextHeart <= 0) { nextHeart = 0.5f + rnd.nextFloat(); heart(); }
+                  }
+
+                  // Weather particles
+                  Weather w = weatherFx ? weather : null;
+                  float windVX = 0, windVY = 0;
+                  if (w != null && w.ok) {
+                      double toward = Math.toRadians(w.windFromDeg + 180);
+                      windVX = (float) Math.sin(toward) * w.windKmh * 5f;
+                      windVY = (float) -Math.cos(toward) * w.windKmh * 2f;
+                      if (w.thunder && rnd.nextFloat() < dt * 0.08f) flash = 1f;
+                  }
+                  flash = Math.max(0, flash - dt * 2.5f);
+                  boolean rain = w != null && w.ok && w.precip == Weather.RAIN;
+                  for (int i = 0; i < flX.length; i++) {
+                      float fall = rain ? 700 * flSpd[i] : 45 * flSpd[i];
+                      flY[i] += (fall + windVY * 0.3f) * dt;
+                      flX[i] += (windVX * (rain ? 0.5f : 1f) + (rain ? 0 : (float) Math.sin(time * 0.8f + i) * 12f)) * dt;
+                      if (flY[i] > VH + 10) { flY[i] = -10; flX[i] = rnd.nextFloat() * VW; }
+                      if (flY[i] < -12) flY[i] = VH + 8;
+                      if (flX[i] < -20) flX[i] += VW + 40;
+                      if (flX[i] > VW + 20) flX[i] -= VW + 40;
+                  }
+                  for (int i = 0; i < stX.length; i++) {
+                      stX[i] += windVX * 2.2f * dt;
+                      stY[i] += windVY * 1.0f * dt;
+                      if (stX[i] < -80) { stX[i] = VW + 60; stY[i] = rnd.nextFloat() * VH; }
+                      if (stX[i] > VW + 80) { stX[i] = -60; stY[i] = rnd.nextFloat() * VH; }
+                      if (stY[i] < -20) stY[i] = VH + 10;
+                      if (stY[i] > VH + 20) stY[i] = -10;
                   }
               }
 
-              // ------------------------------------------------------------------ drawing
+              float ballZ(Ball b) {
+                  float u = b.t / b.dur;
+                  return 30 * (1 - u) + 4 * 45 * u * (1 - u);
+              }
 
-              void draw(Canvas c, List<AppPeng> list) {
+              void throwBall(boolean fromPlayer, AppPeng owner, float x, float y, int face) {
+                  Ball b = new Ball();
+                  float dx = face == LEFT ? -1 : face == RIGHT ? 1 : 0;
+                  float dy = face == UP ? -1 : face == DOWN ? 1 : 0;
+                  if (!fromPlayer) {
+                      float ddx = px - x, ddy = py - y;
+                      float d = (float) Math.max(1, Math.sqrt(ddx * ddx + ddy * ddy));
+                      dx = ddx / d; dy = ddy / d;
+                  }
+                  b.x = x + dx * 20;
+                  b.y = y + dy * 10;
+                  b.vx = dx * 520;
+                  b.vy = dy * 520;
+                  b.dur = 0.75f;
+                  b.fromPlayer = fromPlayer;
+                  b.owner = owner;
+                  balls.add(b);
+                  if (!fromPlayer) play(S_WHOOSH, 0.35f, 1.4f);
+              }
+
+              int faceToward(float x, float y, float tx, float ty) {
+                  float dx = tx - x, dy = ty - y;
+                  return Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
+              }
+
+              static float dist2(float x1, float y1, float x2, float y2) {
+                  float dx = x1 - x2, dy = y1 - y2;
+                  return dx * dx + dy * dy;
+              }
+
+              AppPeng nearestApp(List<AppPeng> list) {
+                  AppPeng best = null;
+                  float bd = NEAR_DIST * NEAR_DIST;
+                  for (AppPeng a : list) {
+                      float d = dist2(a.x, a.y, px, py);
+                      if (d < bd) { bd = d; best = a; }
+                  }
+                  return best;
+              }
+
+              /** Non-penguin things you can use: the igloo door outside, furniture inside. */
+              String nearObject() {
+                  if (scene == SCENE_ISLAND) {
+                      return dist2(px, py, DOOR_X, DOOR_Y + 20) < 70 * 70 ? "door" : null;
+                  }
+                  if (py > 615 && Math.abs(px - 640) < 110) return "exit";
+                  if (px < 400 && py < 520) return "tv";
+                  if (px > 880 && py < 520) return "shelf";
+                  if (Math.abs(px - 640) < 140 && py < 470) return "fire";
+                  return null;
+              }
+
+              String objectLabel(String o) {
+                  switch (o) {
+                      case "door": return "Press OK to go inside";
+                      case "exit": return "Press OK to go outside";
+                      case "tv": return "Press OK for TV Settings";
+                      case "shelf": return "Press OK for Island settings";
+                      case "fire": return "Press OK to warm up by the fire";
+                      default: return "";
+                  }
+              }
+
+              // ================================================================== key handling
+
+              void handleKey(int code, boolean repeat, List<AppPeng> list) {
+                  if (pendingScene >= 0) return;
+                  boolean ok = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
+                          || code == KeyEvent.KEYCODE_NUMPAD_ENTER || code == KeyEvent.KEYCODE_BUTTON_A;
+                  boolean back = code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B;
+                  boolean menu = code == KeyEvent.KEYCODE_INFO || code == KeyEvent.KEYCODE_MENU
+                          || code == KeyEvent.KEYCODE_GUIDE || code == KeyEvent.KEYCODE_BUTTON_Y
+                          || code == KeyEvent.KEYCODE_BUTTON_START;
+                  idleT = 0;
+                  if (pEmote == E_NAP || pEmote == E_SIT || pEmote == E_LOOK) {
+                      if (overlay == OV_NONE) pEmote = E_NONE;
+                  }
+
+                  if (overlay == OV_WHEEL) {
+                      if (back || menu) { overlay = OV_NONE; play(S_TICK, 0.4f, 0.8f); return; }
+                      if (code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_DPAD_DOWN) {
+                          wheelSel = (wheelSel + 1) % 8; play(S_TICK, 0.4f, 1f);
+                      } else if (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_UP) {
+                          wheelSel = (wheelSel + 7) % 8; play(S_TICK, 0.4f, 1f);
+                      } else if (ok) {
+                          overlay = OV_NONE;
+                          wheelAction(wheelSel);
+                      }
+                      return;
+                  }
+                  if (overlay == OV_LIST) {
+                      if (back) {
+                          play(S_TICK, 0.4f, 0.8f);
+                          if (listOnBack != null) listOnBack.run(); else overlay = OV_NONE;
+                          return;
+                      }
+                      if (code == KeyEvent.KEYCODE_DPAD_DOWN) { listSel = Math.min(listItems.size() - 1, listSel + 1); play(S_TICK, 0.3f, 1f); }
+                      else if (code == KeyEvent.KEYCODE_DPAD_UP) { listSel = Math.max(0, listSel - 1); play(S_TICK, 0.3f, 1f); }
+                      else if (ok && !repeat && listSel < listItems.size()) {
+                          Runnable r = listItems.get(listSel).action;
+                          if (r != null) r.run();
+                      }
+                      return;
+                  }
+
+                  if (launching != null) return;
+                  if (back) {
+                      if (scene == SCENE_IGLOO) { goScene(SCENE_ISLAND); return; }
+                      runOnUiThread(this::finish);
+                      return;
+                  }
+                  if (menu) { openWheel(); return; }
+                  if (code == KeyEvent.KEYCODE_BUTTON_X) { doSnowball(); return; }
+                  if (code == KeyEvent.KEYCODE_BUTTON_L1) { startEmote(E_WAVE, 1.8f); return; }
+                  if (code == KeyEvent.KEYCODE_BUTTON_R1) { startEmote(E_DANCE, 3.2f); return; }
+                  if (ok) {
+                      if (scene == SCENE_ISLAND) {
+                          AppPeng a = nearestApp(list);
+                          if (a != null) {
+                              launching = a; launchT = 0;
+                              pEmote = E_NONE;
+                              play(S_OPEN, 0.5f, 1f);
+                              return;
+                          }
+                      }
+                      String o = nearObject();
+                      if (o != null) { useObject(o); return; }
+                      openWheel();
+                  }
+              }
+
+              void openWheel() {
+                  overlay = OV_WHEEL;
+                  pEmote = E_NONE;
+                  play(S_TICK, 0.45f, 1.2f);
+              }
+
+              void wheelAction(int i) {
+                  switch (i) {
+                      case 0: startEmote(E_WAVE, 1.8f); break;
+                      case 1: startEmote(E_DANCE, 3.2f); break;
+                      case 2: doSnowball(); break;
+                      case 3: startEmote(E_SLIDE, 1.1f); break;
+                      case 4: nextZ = 0.4f; startEmote(E_NAP, 0); break;
+                      case 5: openAppsList(null); break;
+                      case 6: openSettings(); break;
+                      case 7: setMusic(!musicOn); break;
+                  }
+              }
+
+              void doSnowball() {
+                  if (scene != SCENE_ISLAND) return;
+                  startEmote(E_THROW, 0.45f);
+              }
+
+              void useObject(String o) {
+                  switch (o) {
+                      case "door": play(S_DOOR, 0.5f, 1f); goScene(SCENE_IGLOO); break;
+                      case "exit": play(S_DOOR, 0.5f, 0.9f); goScene(SCENE_ISLAND); break;
+                      case "tv": play(S_OPEN, 0.5f, 0.9f); startIntent(new Intent(Settings.ACTION_SETTINGS), "Settings"); break;
+                      case "shelf": openSettings(); break;
+                      case "fire": facing = UP; startEmote(E_SIT, 0); break;
+                  }
+              }
+
+              void goScene(int s) {
+                  pendingScene = s;
+                  fadingOut = true;
+                  pEmote = E_NONE;
+              }
+
+              void enterScene(int s) {
+                  if (s == SCENE_IGLOO) {
+                      islandX = px; islandY = py;
+                      px = 640; py = 640; facing = UP;
+                  } else {
+                      px = DOOR_X; py = DOOR_Y + 40; facing = DOWN;
+                  }
+                  scene = s;
+                  lastNearKey = "";
+              }
+
+              void setMusic(boolean on) {
+                  musicOn = on;
+                  prefs.edit().putBoolean("music", on).apply();
+                  play(S_TOGGLE, 0.5f, 1f);
+                  updateMusic();
+              }
+
+              void openSettings() {
+                  play(S_TICK, 0.45f, 1.1f);
+                  listTitle = "Island settings";
+                  listOnBack = null;
+                  listItems.clear();
+                  listItems.add(new Item("Choose which apps live on the island", "›", null, () -> openAppsList(() -> { listSel = 0; openSettings(); })));
+                  listItems.add(new Item("Music", musicOn ? "On" : "Off", null, () -> { setMusic(!musicOn); refreshSettings(); }));
+                  listItems.add(new Item("Sound effects", soundOn ? "On" : "Off", null, () -> {
+                      soundOn = !soundOn;
+                      prefs.edit().putBoolean("sound", soundOn).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
+                  listItems.add(new Item("Season", SEASON_PREF_NAMES[seasonPref], null, () -> {
+                      seasonPref = (seasonPref + 1) % SEASON_PREF_NAMES.length;
+                      prefs.edit().putInt("season", seasonPref).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
+                  listItems.add(new Item("Weather on the island", weatherFx ? "On" : "Off", null, () -> {
+                      weatherFx = !weatherFx;
+                      prefs.edit().putBoolean("weatherfx", weatherFx).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
+                  listItems.add(new Item("Reset most-used order", "", null, () -> {
+                      SharedPreferences.Editor ed = prefs.edit();
+                      synchronized (lock) {
+                          for (AppPeng a : allApps) { a.launches = 0; ed.remove("n_" + a.pkg); }
+                          relayout();
+                      }
+                      ed.apply();
+                      play(S_TOGGLE, 0.5f, 0.8f);
+                  }));
+                  listItems.add(new Item("Close", "", null, () -> overlay = OV_NONE));
+                  listSel = Math.min(listSel, listItems.size() - 1);
+                  if (overlay != OV_LIST) { listSel = 0; listScroll = 0; }
+                  overlay = OV_LIST;
+              }
+
+              void refreshSettings() {
+                  int keep = listSel;
+                  openSettings();
+                  listSel = keep;
+              }
+
+              void openAppsList(Runnable onBack) {
+                  play(S_TICK, 0.45f, 1.1f);
+                  listTitle = "Apps on the island";
+                  listOnBack = onBack;
+                  listItems.clear();
+                  List<AppPeng> all;
+                  synchronized (lock) { all = allApps; }
+                  for (AppPeng a : all) {
+                      final AppPeng app = a;
+                      final Item[] holderItem = new Item[1];
+                      holderItem[0] = new Item(a.label, hidden.contains(a.pkg) ? "Hidden" : "On island", a.icon, () -> {
+                          if (hidden.contains(app.pkg)) hidden.remove(app.pkg); else hidden.add(app.pkg);
+                          prefs.edit().putStringSet("hidden", new HashSet<>(hidden)).apply();
+                          holderItem[0].value = hidden.contains(app.pkg) ? "Hidden" : "On island";
+                          synchronized (lock) { relayout(); }
+                          play(S_TOGGLE, 0.5f, hidden.contains(app.pkg) ? 0.8f : 1.1f);
+                      });
+                      listItems.add(holderItem[0]);
+                  }
+                  listItems.add(new Item("Done", "", null, () -> {
+                      if (listOnBack != null) listOnBack.run(); else overlay = OV_NONE;
+                  }));
+                  listSel = 0;
+                  listScroll = 0;
+                  overlay = OV_LIST;
+              }
+
+              // ================================================================== particles
+
+              Part part(float x, float y, boolean world) {
+                  if (parts.size() > 500) parts.remove(0);
+                  Part q = new Part();
+                  q.x = x; q.y = y; q.world = world;
+                  parts.add(q);
+                  return q;
+              }
+
+              void splat(float x, float y) {
+                  for (int i = 0; i < 12; i++) {
+                      Part q = part(x, y, true);
+                      double a = rnd.nextDouble() * Math.PI * 2;
+                      float s = 60 + rnd.nextFloat() * 110;
+                      q.vx = (float) Math.cos(a) * s; q.vy = (float) Math.sin(a) * s - 60;
+                      q.g = 320; q.max = q.life = 0.5f + rnd.nextFloat() * 0.3f;
+                      q.size = 2 + rnd.nextFloat() * 3; q.color = 0xffffffff;
+                  }
+              }
+
+              void splash(float x, float y) {
+                  for (int i = 0; i < 10; i++) {
+                      Part q = part(x, y, true);
+                      double a = rnd.nextDouble() * Math.PI * 2;
+                      float s = 40 + rnd.nextFloat() * 70;
+                      q.vx = (float) Math.cos(a) * s; q.vy = (float) Math.sin(a) * s - 90;
+                      q.g = 300; q.max = q.life = 0.6f; q.size = 2.5f; q.color = 0xffbbdefb;
+                  }
+              }
+
+              void spawnNote(float x, float y) {
+                  Part q = part(x + (rnd.nextFloat() - 0.5f) * 30, y, true);
+                  q.vx = (rnd.nextFloat() - 0.5f) * 30; q.vy = -45; q.max = q.life = 1.4f;
+                  q.glyph = rnd.nextBoolean() ? "♪" : "♫"; q.size = 24; q.color = 0xff3949ab;
+              }
+
+              void spawnZ(float x, float y) {
+                  Part q = part(x, y, true);
+                  q.vx = 14; q.vy = -28; q.max = q.life = 1.8f;
+                  q.glyph = "z"; q.size = 20; q.color = 0xff5c6bc0;
+              }
+
+              void firework() {
+                  float x = 150 + rnd.nextFloat() * (VW - 300), y = 70 + rnd.nextFloat() * 220;
+                  int col = SCARVES[rnd.nextInt(SCARVES.length)];
+                  for (int i = 0; i < 36; i++) {
+                      Part q = part(x, y, false);
+                      double a = Math.PI * 2 * i / 36;
+                      float s = 110 + rnd.nextFloat() * 90;
+                      q.vx = (float) Math.cos(a) * s; q.vy = (float) Math.sin(a) * s;
+                      q.g = 70; q.max = q.life = 1.3f + rnd.nextFloat() * 0.4f; q.size = 2.6f; q.color = col;
+                  }
+              }
+
+              void heart() {
+                  Part q = part(rnd.nextFloat() * VW, VH + 20, false);
+                  q.vx = (rnd.nextFloat() - 0.5f) * 20; q.vy = -50 - rnd.nextFloat() * 40;
+                  q.max = q.life = 9; q.glyph = "♥"; q.size = 22 + rnd.nextFloat() * 16;
+                  q.color = rnd.nextBoolean() ? 0xffe91e63 : 0xffff80ab;
+              }
+
+              void updateParticles(float dt) {
+                  for (Iterator<Part> it = parts.iterator(); it.hasNext(); ) {
+                      Part q = it.next();
+                      q.life -= dt;
+                      if (q.life <= 0) { it.remove(); continue; }
+                      q.vy += q.g * dt;
+                      q.x += q.vx * dt;
+                      q.y += q.vy * dt;
+                  }
+              }
+
+              void drawParts(Canvas c, boolean world) {
+                  for (Part q : parts) {
+                      if (q.world != world) continue;
+                      int a = (int) (255 * Math.min(1, q.life / q.max * 1.5f));
+                      int col = (a << 24) | (q.color & 0xffffff);
+                      if (q.glyph != null) {
+                          tp.setColor(col);
+                          tp.setTextSize(q.size);
+                          tp.setTextAlign(Paint.Align.CENTER);
+                          c.drawText(q.glyph, q.x, q.y, tp);
+                      } else {
+                          p.setColor(col);
+                          c.drawCircle(q.x, q.y, q.size, p);
+                      }
+                  }
+              }
+
+              // ================================================================== drawing: island
+
+              void drawIsland(Canvas c, List<AppPeng> list) {
                   int camX = (int) Math.max(0, Math.min(WW - VW, px - VW / 2f));
                   int camY = (int) Math.max(0, Math.min(WH - VH, py - VH / 2f - 40));
+                  int season = activeSeason();
+                  float night = nightAmount();
 
                   src.set(camX, camY, camX + VW, camY + VH);
                   dst.set(0, 0, VW, VH);
@@ -842,33 +1732,50 @@ jobs:
                   }
                   p.setStyle(Paint.Style.FILL);
 
-                  // Footprints
+                  // Footprints and slide marks
                   for (int i = 0; i < trailX.length; i++) {
                       float age = trailAge[i];
-                      if (age <= 0 || age > 6) continue;
-                      int alpha = (int) (110 * (1 - age / 6f));
+                      if (age <= 0 || age > 7) continue;
+                      int alpha = (int) (110 * (1 - age / 7f));
                       p.setColor((alpha << 24) | 0xa9bfd0);
-                      c.drawOval(trailX[i] - 4, trailY[i] - 2, trailX[i] + 4, trailY[i] + 2, p);
+                      if (trailSlide[i]) c.drawOval(trailX[i] - 9, trailY[i] - 4, trailX[i] + 9, trailY[i] + 4, p);
+                      else c.drawOval(trailX[i] - 4, trailY[i] - 2, trailX[i] + 4, trailY[i] + 2, p);
                   }
 
-                  // Everyone, sorted top to bottom so closer penguins draw in front
-                  AppPeng near = launching != null ? launching : nearest(list);
+                  // Seasonal ground decorations
+                  drawSeasonGround(c, season, night);
+
+                  // Snowball shadows
+                  p.setColor(0x33000000);
+                  for (Ball b : balls) c.drawOval(b.x - 6, b.y - 2.5f, b.x + 6, b.y + 2.5f, p);
+
+                  // Penguins, back to front
+                  AppPeng near = launching != null ? launching : nearestApp(list);
                   drawList.clear();
                   drawList.addAll(list);
                   drawList.add(this);
                   Collections.sort(drawList, (a, b) -> Float.compare(yOf(a), yOf(b)));
+                  boolean xmas = season == SEASON_XMAS;
                   for (Object o : drawList) {
                       if (o == this) {
-                          float hop = launching != null ? (float) Math.abs(Math.sin(launchT * 18)) * 14 : 0;
-                          drawPenguin(c, px, py - hop, 1.12f, PLAYER_SCARF, facing, walkPhase, moving, true);
+                          drawPlayer(c);
                       } else {
                           AppPeng a = (AppPeng) o;
                           if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
-                          drawPenguin(c, a.x, a.y, 1f, a.scarf, a.facing, a.phase, a.moving, false);
+                          int e = a.emoteDelay > 0 ? E_NONE : a.emote;
+                          drawPenguin(c, a.x, a.y, 1f, a.scarf, a.facing, a.phase, a.moving, false,
+                                  e, a.emoteT, a.blinkT > 0, xmas, a.hitT);
                       }
                   }
-                  // Warm glow in the igloo doorway at night
-                  float night = nightAmount();
+
+                  // Snowballs in the air
+                  p.setColor(0xffffffff);
+                  for (Ball b : balls) {
+                      float z = ballZ(b);
+                      c.drawCircle(b.x, b.y - z, 6, p);
+                  }
+                  drawParts(c, true);
+
                   if (night > 0.05f) {
                       p.setShader(new RadialGradient(IGLOO_X, IGLOO_Y - 14, 60,
                               (((int) (night * 150)) << 24) | 0xffb74d, 0x00ffb74d, Shader.TileMode.CLAMP));
@@ -877,12 +1784,18 @@ jobs:
                   }
                   c.restore();
 
-                  // Night tint
+                  // Sky tint: night, clouds, fog
+                  Weather w = weatherFx ? weather : null;
                   if (night > 0.01f) {
-                      c.drawColor((((int) (night * 115)) << 24) | 0x0a1440);
+                      int tint = season == SEASON_HALLOWEEN ? 0x2a0f45 : 0x0a1440;
+                      c.drawColor((((int) (night * 115)) << 24) | tint);
+                  }
+                  if (w != null && w.ok) {
+                      if (w.cloud > 0) c.drawColor((((int) (w.cloud * 120)) << 24) | 0x5a6672);
+                      if (w.fog > 0) c.drawColor((((int) (w.fog * 255)) << 24) | 0xe8eef2);
                   }
 
-                  // App signs float above everyone, and stay bright at night
+                  // Signs stay bright
                   c.save();
                   c.translate(-camX, -camY);
                   for (AppPeng a : list) {
@@ -891,11 +1804,136 @@ jobs:
                   }
                   c.restore();
 
-                  // Falling snow
-                  p.setColor(0xd0ffffff);
-                  for (int i = 0; i < snowX.length; i++) c.drawCircle(snowX[i], snowY[i], snowR[i], p);
+                  drawWeatherFx(c, w);
+                  drawParts(c, false);
+                  if (flash > 0) c.drawColor(((int) (flash * 170) << 24) | 0xffffff);
 
-                  drawHud(c, near);
+                  String msg = null;
+                  if (overlay == OV_NONE && launching == null) {
+                      if (near != null) msg = "Press OK to open " + near.label;
+                      else {
+                          String o = nearObject();
+                          if (o != null) msg = objectLabel(o);
+                          else if (time < 10) msg = "Arrows to waddle  ·  OK on a penguin opens it  ·  OK anywhere else opens the wheel";
+                      }
+                  }
+                  drawHud(c, msg);
+              }
+
+              void drawPlayer(Canvas c) {
+                  float hop = launching != null ? (float) Math.abs(Math.sin(launchT * 18)) * 14 : 0;
+                  if (pEmote == E_SLIDE) {
+                      drawSlider(c, px, py, facing, PLAYER_SCARF);
+                      return;
+                  }
+                  int f = facing;
+                  if (pEmote == E_LOOK) f = ((int) (pEmoteT / 0.55f)) % 3 == 1 ? LEFT : ((int) (pEmoteT / 0.55f)) % 3 == 2 ? RIGHT : DOWN;
+                  if (pEmote == E_DANCE) f = ((int) (pEmoteT / 0.2f)) % 4;
+                  drawPenguin(c, px, py - hop, 1.12f, PLAYER_SCARF, f, walkPhase, moving, true,
+                          pEmote, pEmoteT, pBlinkT > 0 || pEmote == E_NAP, false, pHitT);
+              }
+
+              void drawSeasonGround(Canvas c, int season, float night) {
+                  if (season == SEASON_XMAS) {
+                      // Lights along the igloo
+                      for (int i = 0; i < 15; i++) {
+                          double a = Math.toRadians(192 + i * (156.0 / 14));
+                          float lx = IGLOO_X + (float) Math.cos(a) * 127;
+                          float ly = IGLOO_Y + (float) Math.sin(a) * 127;
+                          int col = LIGHT_COLS[i % LIGHT_COLS.length];
+                          boolean on = ((int) (time * 2.5f) + i) % 3 != 0;
+                          p.setColor(on ? col : 0xff555555);
+                          c.drawCircle(lx, ly, 5, p);
+                          if (on && night > 0.1f) {
+                              p.setColor(((int) (night * 70) << 24) | (col & 0xffffff));
+                              c.drawCircle(lx, ly, 12, p);
+                          }
+                      }
+                      // Decorated tree with presents
+                      float tx = IGLOO_X + 200, ty = IGLOO_Y + 15;
+                      drawTree(c, p, tx, ty, 1.5f);
+                      int[] orn = {0xffe53935, 0xfffdd835, 0xff1e88e5, 0xffff80ab};
+                      float[][] spots = {{-25, -40}, {18, -48}, {-12, -70}, {14, -88}, {-4, -100}, {28, -30}, {-30, -25}};
+                      for (int i = 0; i < spots.length; i++) {
+                          boolean tw = ((int) (time * 3) + i) % 4 != 0;
+                          p.setColor(tw ? orn[i % orn.length] : 0xffffffff);
+                          c.drawCircle(tx + spots[i][0], ty + spots[i][1], 4.5f, p);
+                      }
+                      p.setColor(0xffffd54f);
+                      drawStar(c, tx, ty - 132, 11);
+                      p.setColor(0xffe53935); c.drawRect(tx - 40, ty - 4, tx - 16, ty + 18, p);
+                      p.setColor(0xfffdd835); c.drawRect(tx - 30, ty - 4, tx - 26, ty + 18, p);
+                      p.setColor(0xff1e88e5); c.drawRect(tx + 14, ty - 2, tx + 36, ty + 18, p);
+                      p.setColor(0xffffffff); c.drawRect(tx + 23, ty - 2, tx + 27, ty + 18, p);
+                  } else if (season == SEASON_HALLOWEEN) {
+                      float[][] pk = {{-170, 50}, {-110, 75}, {110, 75}, {170, 50}, {230, 10}, {-230, 10}};
+                      for (float[] q : pk) drawPumpkin(c, IGLOO_X + q[0], IGLOO_Y + q[1], night);
+                  }
+              }
+
+              void drawStar(Canvas c, float x, float y, float r) {
+                  path.reset();
+                  for (int i = 0; i < 10; i++) {
+                      double a = -Math.PI / 2 + i * Math.PI / 5;
+                      float rr = i % 2 == 0 ? r : r * 0.45f;
+                      float sx = x + (float) Math.cos(a) * rr, sy = y + (float) Math.sin(a) * rr;
+                      if (i == 0) path.moveTo(sx, sy); else path.lineTo(sx, sy);
+                  }
+                  path.close();
+                  c.drawPath(path, p);
+              }
+
+              void drawPumpkin(Canvas c, float x, float y, float night) {
+                  p.setColor(0x30000000);
+                  c.drawOval(x - 20, y - 5, x + 20, y + 5, p);
+                  p.setColor(0xffef6c00);
+                  c.drawOval(x - 20, y - 30, x + 20, y, p);
+                  p.setColor(0xfff57c00);
+                  c.drawOval(x - 9, y - 31, x + 9, y, p);
+                  p.setColor(0xff558b2f);
+                  c.drawRect(x - 2, y - 38, x + 2, y - 28, p);
+                  float flick = 0.7f + 0.3f * (float) Math.sin(time * 13 + x);
+                  p.setColor(night > 0.1f ? (0xff000000 | ((int) (255 * flick) << 16) | ((int) (200 * flick) << 8)) : 0xff3e2723);
+                  path.reset();
+                  path.moveTo(x - 10, y - 20); path.lineTo(x - 4, y - 20); path.lineTo(x - 7, y - 25); path.close();
+                  path.moveTo(x + 4, y - 20); path.lineTo(x + 10, y - 20); path.lineTo(x + 7, y - 25); path.close();
+                  c.drawPath(path, p);
+                  rf.set(x - 10, y - 15, x + 10, y - 6);
+                  c.drawArc(rf, 0, 180, true, p);
+              }
+
+              void drawWeatherFx(Canvas c, Weather w) {
+                  int count;
+                  boolean rain = false;
+                  if (w == null || !w.ok) count = (int) (flX.length * 0.35f);
+                  else if (w.precip == Weather.NONE) count = 0;
+                  else { count = (int) (flX.length * Math.max(0.15f, w.intensity)); rain = w.precip == Weather.RAIN; }
+
+                  if (rain) {
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(1.6f);
+                      p.setColor(0x90cfe3f2);
+                      float slant = w.windKmh * 0.25f * (float) Math.sin(Math.toRadians(w.windFromDeg + 180));
+                      for (int i = 0; i < count; i++) c.drawLine(flX[i], flY[i], flX[i] + slant, flY[i] + 16, p);
+                      p.setStyle(Paint.Style.FILL);
+                  } else {
+                      p.setColor(0xd0ffffff);
+                      for (int i = 0; i < count; i++) c.drawCircle(flX[i], flY[i], flR[i], p);
+                  }
+                  // Blowing snow streaks on windy days
+                  if (w != null && w.ok && w.windKmh > 18) {
+                      float strength = Math.min(1, (w.windKmh - 18) / 30f);
+                      double toward = Math.toRadians(w.windFromDeg + 180);
+                      float ux = (float) Math.sin(toward), uy = (float) -Math.cos(toward) * 0.45f;
+                      float ul = (float) Math.sqrt(ux * ux + uy * uy);
+                      ux /= ul; uy /= ul;
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(2f);
+                      p.setColor(((int) (strength * 110) << 24) | 0xffffff);
+                      int n = (int) (stX.length * strength);
+                      for (int i = 0; i < n; i++) c.drawLine(stX[i], stY[i], stX[i] - ux * stLen[i], stY[i] - uy * stLen[i], p);
+                      p.setStyle(Paint.Style.FILL);
+                  }
               }
 
               float yOf(Object o) {
@@ -911,72 +1949,158 @@ jobs:
                   return 0f;
               }
 
-              void drawPenguin(Canvas c, float x, float y, float s, int scarf, int face,
-                               float phase, boolean walking, boolean player) {
+              // ================================================================== drawing: igloo inside
+
+              void drawRoom(Canvas c) {
+                  c.drawBitmap(room, 0, 0, null);
+                  int season = activeSeason();
+                  // Fire
+                  float fx = 640, fy = 290;
+                  float flick = (float) Math.sin(time * 11) * 0.5f + (float) Math.sin(time * 17.3f) * 0.5f;
+                  p.setShader(new RadialGradient(fx, fy + 40, 330 + flick * 12,
+                          0x55ffb74d, 0x00ffb74d, Shader.TileMode.CLAMP));
+                  c.drawCircle(fx, fy + 40, 330 + flick * 12, p);
+                  p.setShader(null);
+                  int[] flameCols = {0xffff7043, 0xffffa726, 0xffffeb3b};
+                  for (int layer = 0; layer < 3; layer++) {
+                      float scale = 1 - layer * 0.28f;
+                      for (int i = -2; i <= 2; i++) {
+                          float h = (55 + (float) Math.sin(time * (9 + i) + i * 2 + layer) * 14) * scale;
+                          float bx = fx + i * 18 * scale;
+                          path.reset();
+                          path.moveTo(bx - 14 * scale, fy - 6);
+                          path.quadTo(bx - 10 * scale, fy - h * 0.6f, bx + (float) Math.sin(time * 7 + i) * 5, fy - h);
+                          path.quadTo(bx + 10 * scale, fy - h * 0.6f, bx + 14 * scale, fy - 6);
+                          path.close();
+                          p.setColor(flameCols[layer]);
+                          c.drawPath(path, p);
+                      }
+                  }
+                  // Seasonal touches
+                  if (season == SEASON_XMAS) {
+                      for (int i = 0; i < 3; i++) {
+                          float sx = 560 + i * 70;
+                          p.setColor(i == 1 ? 0xff43a047 : 0xffe53935);
+                          c.drawRect(sx, 128, sx + 22, 168, p);
+                          c.drawOval(sx - 4, 156, sx + 30, 176, p);
+                          p.setColor(0xffffffff);
+                          c.drawRect(sx - 2, 124, sx + 24, 136, p);
+                      }
+                  } else if (season == SEASON_HALLOWEEN) {
+                      drawPumpkin(c, 720, 108, 1);
+                  }
+
+                  // Player (and a cozy chirp when sitting)
+                  drawPlayer(c);
+                  drawParts(c, true);
+
+                  String msg = null;
+                  if (overlay == OV_NONE) {
+                      String o = nearObject();
+                      if (o != null) msg = objectLabel(o);
+                      else msg = "Back to go outside";
+                  }
+                  drawHud(c, msg);
+              }
+
+              // ================================================================== drawing: penguins
+
+              void drawPenguin(Canvas c, float x, float y, float s, int scarf, int face, float phase, boolean walking,
+                               boolean player, int emote, float et, boolean blink, boolean xmasHat, float hitT) {
+                  boolean sitting = emote == E_NAP || emote == E_SIT;
+                  float hop = 0;
+                  if (emote == E_HOP) hop = (float) Math.abs(Math.sin(et / 0.6f * Math.PI)) * 12;
+                  if (emote == E_DANCE) hop = (float) Math.abs(Math.sin(et * 10)) * 10;
+                  float shake = emote == E_FLINCH ? (float) Math.sin(et * 60) * 3 : 0;
+
                   c.save();
-                  c.translate(x, y);
+                  c.translate(x + shake, y);
                   c.scale(s, s);
 
                   p.setColor(0x30000000);
                   c.drawOval(-22, -6, 22, 6, p);
+                  c.translate(0, -hop);
 
                   float sway = walking ? (float) Math.sin(phase) * 7f : (float) Math.sin(phase * 0.5f) * 1.5f;
+                  if (emote == E_DANCE) sway = (float) Math.sin(et * 9) * 12;
                   c.rotate(sway);
 
+                  float headY = sitting ? -48 : -60;
+
                   // Feet
-                  float lift = walking ? (float) Math.sin(phase) * 3f : 0;
                   p.setColor(0xffef8a3c);
-                  c.drawOval(-15, -5 - Math.max(0, lift), -3, 2 - Math.max(0, lift), p);
-                  c.drawOval(3, -5 - Math.max(0, -lift), 15, 2 - Math.max(0, -lift), p);
+                  if (sitting) {
+                      c.drawOval(-14, -6, -2, 4, p);
+                      c.drawOval(2, -6, 14, 4, p);
+                  } else {
+                      float lift = walking ? (float) Math.sin(phase) * 3f : 0;
+                      c.drawOval(-15, -5 - Math.max(0, lift), -3, 2 - Math.max(0, lift), p);
+                      c.drawOval(3, -5 - Math.max(0, -lift), 15, 2 - Math.max(0, -lift), p);
+                  }
 
                   // Flippers
+                  float leftA = 18, rightA = -18;
                   float flap = walking ? (float) Math.sin(phase) * 14f : 0;
+                  leftA += flap; rightA -= flap;
+                  if (emote == E_FLAP || emote == E_DANCE) {
+                      float f = (float) Math.sin(et * 22) * 35 + 25;
+                      leftA = 18 + f; rightA = -18 - f;
+                  } else if (emote == E_WAVE) {
+                      rightA = -150 + (float) Math.sin(et * 16) * 28;
+                  } else if (emote == E_THROW) {
+                      rightA = et < 0.12f ? 40 : -120;
+                  } else if (emote == E_FLINCH) {
+                      leftA = 60; rightA = -60;
+                  }
+                  float shoulder = headY + 20;
                   p.setColor(0xff1b2230);
                   c.save();
-                  c.rotate(18 + flap, -18, -40);
-                  c.drawOval(-25, -44, -14, -18, p);
+                  c.rotate(leftA, -18, shoulder);
+                  c.drawOval(-25, headY + 16, -14, headY + 42, p);
                   c.restore();
                   c.save();
-                  c.rotate(-18 - flap, 18, -40);
-                  c.drawOval(14, -44, 25, -18, p);
+                  c.rotate(rightA, 18, shoulder);
+                  c.drawOval(14, headY + 16, 25, headY + 42, p);
                   c.restore();
 
                   // Body and head
-                  c.drawOval(-20, -62, 20, 0, p);
-                  c.drawCircle(0, -60, 15, p);
+                  c.drawOval(sitting ? -21 : -20, headY - 2, sitting ? 21 : 20, 0, p);
+                  c.drawCircle(0, headY, 15, p);
 
-                  // Belly
                   if (face != UP) {
                       p.setColor(0xfffafcff);
-                      if (face == DOWN) c.drawOval(-14, -50, 14, -3, p);
-                      else if (face == LEFT) c.drawOval(-17, -48, 5, -4, p);
-                      else c.drawOval(-5, -48, 17, -4, p);
-                  }
+                      if (face == DOWN) c.drawOval(-14, headY + 10, 14, -3, p);
+                      else if (face == LEFT) c.drawOval(-17, headY + 12, 5, -4, p);
+                      else c.drawOval(-5, headY + 12, 17, -4, p);
 
-                  // Face
-                  if (face != UP) {
                       float ex1, ex2, bx;
                       boolean twoEyes = face == DOWN;
                       if (face == DOWN) { ex1 = -6; ex2 = 6; bx = 0; }
                       else if (face == LEFT) { ex1 = -7; ex2 = -7; bx = -1; }
                       else { ex1 = 7; ex2 = 7; bx = 1; }
-                      p.setColor(0xffffffff);
-                      c.drawCircle(ex1, -64, 4.2f, p);
-                      if (twoEyes) c.drawCircle(ex2, -64, 4.2f, p);
-                      p.setColor(0xff111111);
-                      float look = face == LEFT ? -1 : face == RIGHT ? 1 : 0;
-                      c.drawCircle(ex1 + look, -63.5f, 2.1f, p);
-                      if (twoEyes) c.drawCircle(ex2 + look, -63.5f, 2.1f, p);
+                      float eyeY = headY - 4;
+                      if (blink) {
+                          p.setStyle(Paint.Style.STROKE);
+                          p.setStrokeWidth(2);
+                          p.setColor(0xfffafcff);
+                          c.drawLine(ex1 - 3.5f, eyeY, ex1 + 3.5f, eyeY, p);
+                          if (twoEyes) c.drawLine(ex2 - 3.5f, eyeY, ex2 + 3.5f, eyeY, p);
+                          p.setStyle(Paint.Style.FILL);
+                      } else {
+                          p.setColor(0xffffffff);
+                          c.drawCircle(ex1, eyeY, 4.2f, p);
+                          if (twoEyes) c.drawCircle(ex2, eyeY, 4.2f, p);
+                          p.setColor(0xff111111);
+                          float look = face == LEFT ? -1 : face == RIGHT ? 1 : 0;
+                          c.drawCircle(ex1 + look, eyeY + 0.5f, 2.1f, p);
+                          if (twoEyes) c.drawCircle(ex2 + look, eyeY + 0.5f, 2.1f, p);
+                      }
                       p.setColor(0xffffa726);
                       path.reset();
                       if (bx == 0) {
-                          path.moveTo(-4.5f, -59);
-                          path.lineTo(4.5f, -59);
-                          path.lineTo(0, -52);
+                          path.moveTo(-4.5f, headY + 1); path.lineTo(4.5f, headY + 1); path.lineTo(0, headY + 8);
                       } else {
-                          path.moveTo(bx * 11, -61);
-                          path.lineTo(bx * 11, -55);
-                          path.lineTo(bx * 21, -58);
+                          path.moveTo(bx * 11, headY - 1); path.lineTo(bx * 11, headY + 5); path.lineTo(bx * 21, headY + 2);
                       }
                       path.close();
                       c.drawPath(path, p);
@@ -984,21 +2108,89 @@ jobs:
 
                   // Scarf
                   p.setColor(scarf);
-                  rf.set(-17, -51, 17, -44);
+                  rf.set(-17, headY + 9, 17, headY + 16);
                   c.drawRoundRect(rf, 4, 4, p);
                   float tailX = face == LEFT ? 8 : face == RIGHT ? -14 : 5;
-                  float wave = walking ? (float) Math.sin(phase * 1.3f) * 2 : 0;
-                  rf.set(tailX, -47, tailX + 7, -32 + wave);
+                  float wv = walking ? (float) Math.sin(phase * 1.3f) * 2 : 0;
+                  rf.set(tailX, headY + 13, tailX + 7, headY + 28 + wv);
                   c.drawRoundRect(rf, 3, 3, p);
 
-                  // Your penguin wears a beanie so you can always spot yourself
                   if (player) {
-                      rf.set(-14, -80, 14, -60);
+                      rf.set(-14, headY - 20, 14, headY);
                       c.drawArc(rf, 180, 180, true, p);
                       p.setColor(0xffffffff);
-                      rf.set(-15, -72, 15, -67);
+                      rf.set(-15, headY - 12, 15, headY - 7);
                       c.drawRoundRect(rf, 2, 2, p);
-                      c.drawCircle(0, -80, 4.5f, p);
+                      c.drawCircle(0, headY - 20, 4.5f, p);
+                  } else if (xmasHat) {
+                      p.setColor(0xffd32f2f);
+                      path.reset();
+                      path.moveTo(-12, headY - 9); path.lineTo(12, headY - 9); path.lineTo(10, headY - 28); path.close();
+                      c.drawPath(path, p);
+                      p.setColor(0xffffffff);
+                      rf.set(-13, headY - 12, 13, headY - 7);
+                      c.drawRoundRect(rf, 2, 2, p);
+                      c.drawCircle(10, headY - 28, 3.5f, p);
+                  }
+
+                  // Got hit by a snowball
+                  if (hitT > 0) {
+                      int a = (int) (255 * Math.min(1, hitT));
+                      p.setColor((a << 24) | 0xffffff);
+                      c.drawCircle(-5, headY - 12, 7, p);
+                      c.drawCircle(5, headY - 14, 6, p);
+                      c.drawCircle(0, headY - 18, 5, p);
+                  }
+                  c.restore();
+              }
+
+              void drawSlider(Canvas c, float x, float y, int face, int scarf) {
+                  c.save();
+                  c.translate(x, y);
+                  p.setColor(0x30000000);
+                  c.drawOval(-36, -7, 36, 7, p);
+                  if (face == LEFT || face == RIGHT) {
+                      float d = face == LEFT ? -1 : 1;
+                      c.scale(d, 1);
+                      p.setColor(0xfffafcff);
+                      c.drawOval(-30, -10, 26, 2, p);
+                      p.setColor(0xff1b2230);
+                      c.drawOval(-34, -24, 28, -2, p);
+                      c.drawCircle(30, -12, 13, p);
+                      c.drawOval(-12, -30, 6, -20, p);
+                      p.setColor(0xffffa726);
+                      path.reset(); path.moveTo(40, -15); path.lineTo(40, -9); path.lineTo(50, -12); path.close();
+                      c.drawPath(path, p);
+                      p.setColor(0xffffffff); c.drawCircle(35, -16, 3.5f, p);
+                      p.setColor(0xff111111); c.drawCircle(36, -16, 1.8f, p);
+                      p.setColor(scarf);
+                      rf.set(14, -22, 20, -2);
+                      c.drawRoundRect(rf, 3, 3, p);
+                      p.setColor(0xffef8a3c);
+                      c.drawOval(-44, -12, -32, -4, p);
+                  } else {
+                      boolean toward = face == DOWN;
+                      p.setColor(0xff1b2230);
+                      c.drawOval(-16, -44, 16, 0, p);
+                      float hy = toward ? -6 : -40;
+                      c.drawCircle(0, hy, 13, p);
+                      c.drawOval(-30, -30, -12, -18, p);
+                      c.drawOval(12, -30, 30, -18, p);
+                      p.setColor(scarf);
+                      rf.set(-14, toward ? -18 : -32, 14, toward ? -13 : -27);
+                      c.drawRoundRect(rf, 3, 3, p);
+                      if (toward) {
+                          p.setColor(0xffffffff);
+                          c.drawCircle(-5, -9, 3.6f, p); c.drawCircle(5, -9, 3.6f, p);
+                          p.setColor(0xff111111);
+                          c.drawCircle(-5, -8.5f, 1.8f, p); c.drawCircle(5, -8.5f, 1.8f, p);
+                          p.setColor(0xffffa726);
+                          path.reset(); path.moveTo(-4, -3); path.lineTo(4, -3); path.lineTo(0, 3); path.close();
+                          c.drawPath(path, p);
+                      } else {
+                          p.setColor(0xffef8a3c);
+                          c.drawOval(-12, -6, -2, 2, p); c.drawOval(2, -6, 12, 2, p);
+                      }
                   }
                   c.restore();
               }
@@ -1009,16 +2201,12 @@ jobs:
                   float cx = a.x, cy = a.y - 105 + bob - (highlight ? 8 : 0);
                   float half = 30 * s;
 
-                  // Pointer
                   p.setColor(0xffffffff);
                   path.reset();
-                  path.moveTo(cx - 7, cy + half - 1);
-                  path.lineTo(cx + 7, cy + half - 1);
-                  path.lineTo(cx, cy + half + 9);
+                  path.moveTo(cx - 7, cy + half - 1); path.lineTo(cx + 7, cy + half - 1); path.lineTo(cx, cy + half + 9);
                   path.close();
                   c.drawPath(path, p);
 
-                  // Card
                   p.setColor(0x40000000);
                   rf.set(cx - half + 2, cy - half + 4, cx + half + 2, cy + half + 4);
                   c.drawRoundRect(rf, 12, 12, p);
@@ -1042,8 +2230,6 @@ jobs:
                       tp.setTextAlign(Paint.Align.CENTER);
                       c.drawText(a.label.substring(0, 1).toUpperCase(Locale.getDefault()), cx, cy + 10 * s, tp);
                   }
-
-                  // Name tag under the card when you're close
                   if (highlight) {
                       String name = a.label.length() > 20 ? a.label.substring(0, 19) + "…" : a.label;
                       tp.setTextSize(22);
@@ -1057,22 +2243,51 @@ jobs:
                   }
               }
 
-              void drawHud(Canvas c, AppPeng near) {
+              // ================================================================== drawing: HUD + overlays
+
+              void drawHud(Canvas c, String msg) {
                   long now = System.currentTimeMillis();
                   String t = timeFmt.format(now);
                   String d = dateFmt.format(now);
+                  Weather w = weather;
+                  String wl1 = null, wl2 = null;
+                  if (w != null && w.ok) {
+                      wl1 = w.emoji + "  " + Math.round(w.tempC) + "°  " + w.desc;
+                      wl2 = (w.city.isEmpty() ? "" : w.city + "  ·  ") + "wind " + Math.round(w.windKmh) + " km/h";
+                  }
+
                   tp.setTextAlign(Paint.Align.RIGHT);
-                  tp.setShadowLayer(4, 0, 2, 0x99000000);
+                  tp.setTextSize(40);
+                  float wMax = tp.measureText(t);
+                  tp.setTextSize(20);
+                  wMax = Math.max(wMax, tp.measureText(d));
+                  if (wl1 != null) {
+                      wMax = Math.max(wMax, tp.measureText(wl1));
+                      tp.setTextSize(16);
+                      wMax = Math.max(wMax, tp.measureText(wl2));
+                  }
+                  float right = VW - 30, top = 22;
+                  float bottom = wl1 != null ? 160 : 102;
+                  rf.set(right - wMax - 36, top, right, bottom);
+                  p.setColor(0x8c0f1c2a);
+                  c.drawRoundRect(rf, 18, 18, p);
+
+                  float tx = right - 18;
                   tp.setColor(0xffffffff);
                   tp.setTextSize(40);
-                  c.drawText(t, VW - 40, 62, tp);
+                  c.drawText(t, tx, top + 46, tp);
                   tp.setTextSize(20);
-                  c.drawText(d, VW - 40, 90, tp);
-                  tp.setShadowLayer(0, 0, 0, 0);
+                  tp.setColor(0xffcfd8dc);
+                  c.drawText(d, tx, top + 72, tp);
+                  if (wl1 != null) {
+                      tp.setColor(0xffffffff);
+                      tp.setTextSize(20);
+                      c.drawText(wl1, tx, top + 104, tp);
+                      tp.setTextSize(16);
+                      tp.setColor(0xffb0bec5);
+                      c.drawText(wl2, tx, top + 126, tp);
+                  }
 
-                  String msg = null;
-                  if (near != null && launching == null) msg = "Press OK to open " + near.label;
-                  else if (time < 9 && near == null) msg = "Use the arrows to waddle around. Walk up to a penguin and press OK.";
                   if (msg != null) {
                       tp.setTextAlign(Paint.Align.CENTER);
                       tp.setTextSize(22);
@@ -1082,6 +2297,519 @@ jobs:
                       c.drawRoundRect(rf, 22, 22, p);
                       tp.setColor(0xffffffff);
                       c.drawText(msg, VW / 2f, VH - 44, tp);
+                  }
+              }
+
+              void drawOverlays(Canvas c) {
+                  if (overlay == OV_WHEEL) drawWheel(c);
+                  else if (overlay == OV_LIST) drawListPanel(c);
+                  if (fade > 0) c.drawColor(((int) (fade * 255)) << 24);
+              }
+
+              void drawWheel(Canvas c) {
+                  // Stick picks a slice directly
+                  if (Math.abs(axX) + Math.abs(axY) > 0.6f) {
+                      double ang = Math.toDegrees(Math.atan2(axY, axX)) + 90;
+                      if (ang < 0) ang += 360;
+                      int sel = (int) Math.round(ang / 45.0) % 8;
+                      if (sel != wheelSel) { wheelSel = sel; play(S_TICK, 0.3f, 1f); }
+                  }
+                  c.drawColor(0x66000000);
+                  float cx = VW / 2f, cy = VH / 2f, ro = 245, ri = 92;
+                  p.setColor(0xd9142433);
+                  c.drawCircle(cx, cy, ro, p);
+                  rf.set(cx - ro, cy - ro, cx + ro, cy + ro);
+                  p.setColor(0xff2e7dbd);
+                  c.drawArc(rf, -90 + wheelSel * 45 - 22.5f, 45, true, p);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(2);
+                  p.setColor(0x40ffffff);
+                  for (int i = 0; i < 8; i++) {
+                      double a = Math.toRadians(-90 + i * 45 - 22.5);
+                      c.drawLine(cx + (float) Math.cos(a) * ri, cy + (float) Math.sin(a) * ri,
+                              cx + (float) Math.cos(a) * ro, cy + (float) Math.sin(a) * ro, p);
+                  }
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(0xff0f1c2a);
+                  c.drawCircle(cx, cy, ri, p);
+
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  for (int i = 0; i < 8; i++) {
+                      double a = Math.toRadians(-90 + i * 45);
+                      float ix = cx + (float) Math.cos(a) * 168, iy = cy + (float) Math.sin(a) * 168;
+                      tp.setColor(0xffffffff);
+                      tp.setTextSize(i == wheelSel ? 46 : 38);
+                      c.drawText(WHEEL_ICONS[i], ix, iy + 8, tp);
+                      tp.setTextSize(14);
+                      tp.setColor(i == wheelSel ? 0xffffffff : 0xffb0bec5);
+                      String nm = i == 7 ? (musicOn ? "Music: on" : "Music: off") : WHEEL_NAMES[i];
+                      c.drawText(nm, ix, iy + 34, tp);
+                  }
+                  tp.setColor(0xffffffff);
+                  tp.setTextSize(20);
+                  String nm = wheelSel == 7 ? (musicOn ? "Turn music off" : "Turn music on") : WHEEL_NAMES[wheelSel];
+                  c.drawText(nm, cx, cy + 6, tp);
+                  tp.setTextSize(13);
+                  tp.setColor(0xff90a4ae);
+                  c.drawText("OK to choose", cx, cy + 30, tp);
+              }
+
+              void drawListPanel(Canvas c) {
+                  c.drawColor(0x88000000);
+                  float w = 700, h = 560;
+                  float l = (VW - w) / 2, t = (VH - h) / 2;
+                  rf.set(l, t, l + w, t + h);
+                  p.setColor(0xf0142433);
+                  c.drawRoundRect(rf, 24, 24, p);
+                  tp.setTextAlign(Paint.Align.LEFT);
+                  tp.setColor(0xffffffff);
+                  tp.setTextSize(28);
+                  c.drawText(listTitle, l + 32, t + 50, tp);
+                  tp.setTextSize(15);
+                  tp.setColor(0xff90a4ae);
+                  c.drawText("Up/Down to move  ·  OK to change  ·  Back to close", l + 32, t + 76, tp);
+
+                  int rows = 7;
+                  float rowH = 62, rowTop = t + 96;
+                  if (listSel < listScroll) listScroll = listSel;
+                  if (listSel >= listScroll + rows) listScroll = listSel - rows + 1;
+                  for (int r = 0; r < rows; r++) {
+                      int i = listScroll + r;
+                      if (i >= listItems.size()) break;
+                      Item it = listItems.get(i);
+                      float y = rowTop + r * rowH;
+                      if (i == listSel) {
+                          rf.set(l + 16, y, l + w - 16, y + rowH - 6);
+                          p.setColor(0xff2e7dbd);
+                          c.drawRoundRect(rf, 14, 14, p);
+                      }
+                      float textX = l + 36;
+                      if (it.icon != null) {
+                          rf.set(l + 30, y + 9, l + 68, y + 47);
+                          c.drawBitmap(it.icon, null, rf, p);
+                          textX = l + 84;
+                      }
+                      tp.setTextAlign(Paint.Align.LEFT);
+                      tp.setTextSize(21);
+                      tp.setColor(0xffffffff);
+                      String lab = it.label.length() > 34 ? it.label.substring(0, 33) + "…" : it.label;
+                      c.drawText(lab, textX, y + 36, tp);
+                      if (it.value != null && !it.value.isEmpty()) {
+                          tp.setTextAlign(Paint.Align.RIGHT);
+                          boolean off = it.value.equals("Hidden") || it.value.equals("Off");
+                          tp.setColor(off ? 0xffff8a80 : 0xffa5d6a7);
+                          if (it.value.equals("›")) tp.setColor(0xffffffff);
+                          c.drawText(it.value, l + w - 36, y + 36, tp);
+                      }
+                  }
+                  if (listItems.size() > rows) {
+                      float barH = h - 130;
+                      float frac = rows / (float) listItems.size();
+                      float pos = listScroll / (float) Math.max(1, listItems.size() - rows);
+                      p.setColor(0x33ffffff);
+                      rf.set(l + w - 10, rowTop, l + w - 6, rowTop + barH);
+                      c.drawRoundRect(rf, 2, 2, p);
+                      p.setColor(0xaaffffff);
+                      float bh = barH * frac;
+                      rf.set(l + w - 10, rowTop + (barH - bh) * pos, l + w - 6, rowTop + (barH - bh) * pos + bh);
+                      c.drawRoundRect(rf, 2, 2, p);
+                  }
+              }
+          }
+          SNOW_EOF
+          mkdir -p app/src/main/java/com/josh/snowisland
+          cat > app/src/main/java/com/josh/snowisland/Synth.java <<'SNOW_EOF'
+          package com.josh.snowisland;
+
+          import java.io.BufferedOutputStream;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.OutputStream;
+          import java.util.Random;
+
+          /**
+           * Makes every sound in the app from scratch with math, so there are no audio files to ship.
+           * Sounds are written as small .wav files the first time the app runs, then reused.
+           */
+          final class Synth {
+              static final int RATE = 22050;
+
+              private Synth() { }
+
+              // ------------------------------------------------------------------ sound effects
+
+              static float[] step() {
+                  Random r = new Random(11);
+                  int n = (int) (RATE * 0.07);
+                  float[] out = new float[n];
+                  float lp = 0;
+                  for (int i = 0; i < n; i++) {
+                      float t = i / (float) n;
+                      float env = (float) (Math.min(1, t * 40) * Math.pow(1 - t, 2.5));
+                      lp += 0.35f * ((r.nextFloat() * 2 - 1) - lp);
+                      out[i] = lp * env * 0.55f;
+                  }
+                  return out;
+              }
+
+              static float[] chirp() {
+                  int n = (int) (RATE * 0.16);
+                  float[] out = new float[n];
+                  double ph = 0;
+                  for (int i = 0; i < n; i++) {
+                      float t = i / (float) n;
+                      double f = t < 0.45 ? 1050 + 650 * (t / 0.45) : 1700 - 350 * ((t - 0.45) / 0.55);
+                      f += Math.sin(i / (double) RATE * 2 * Math.PI * 28) * 40;
+                      ph += 2 * Math.PI * f / RATE;
+                      float env = (float) (Math.min(1, t * 25) * Math.pow(1 - t, 1.6));
+                      out[i] = (float) (Math.sin(ph) + 0.25 * Math.sin(2 * ph)) * env * 0.32f;
+                  }
+                  return out;
+              }
+
+              static float[] open() {
+                  float[] out = new float[(int) (RATE * 0.75)];
+                  int[] notes = {84, 88, 91, 96};
+                  for (int k = 0; k < notes.length; k++) addBell(out, (int) (k * 0.07f * RATE), midi(notes[k]), 0.5f, 0.22f, false);
+                  return out;
+              }
+
+              static float[] whoosh() {
+                  Random r = new Random(5);
+                  int n = (int) (RATE * 0.28);
+                  float[] out = new float[n];
+                  float lp = 0;
+                  for (int i = 0; i < n; i++) {
+                      float t = i / (float) n;
+                      float cut = 0.04f + 0.3f * (float) Math.sin(Math.PI * t);
+                      lp += cut * ((r.nextFloat() * 2 - 1) - lp);
+                      out[i] = lp * (float) Math.sin(Math.PI * t) * 0.7f;
+                  }
+                  return out;
+              }
+
+              static float[] splat() {
+                  Random r = new Random(9);
+                  int n = (int) (RATE * 0.14);
+                  float[] out = new float[n];
+                  float lp = 0;
+                  for (int i = 0; i < n; i++) {
+                      float t = i / (float) n;
+                      lp += 0.18f * ((r.nextFloat() * 2 - 1) - lp);
+                      float env = (float) (Math.min(1, t * 60) * Math.pow(1 - t, 3));
+                      out[i] = lp * env * 1.1f;
+                  }
+                  return out;
+              }
+
+              static float[] tick() {
+                  int n = (int) (RATE * 0.03);
+                  float[] out = new float[n];
+                  for (int i = 0; i < n; i++) {
+                      float t = i / (float) n;
+                      out[i] = (float) Math.sin(2 * Math.PI * 1900 * i / RATE) * (1 - t) * (1 - t) * 0.25f;
+                  }
+                  return out;
+              }
+
+              static float[] toggle() {
+                  float[] out = new float[(int) (RATE * 0.25)];
+                  addBell(out, 0, midi(79), 0.25f, 0.18f, false);
+                  addBell(out, (int) (0.06f * RATE), midi(86), 0.25f, 0.18f, false);
+                  return out;
+              }
+
+              static float[] door() {
+                  float[] out = new float[(int) (RATE * 0.6)];
+                  // soft thump
+                  for (int i = 0; i < RATE * 0.12; i++) {
+                      float t = i / (RATE * 0.12f);
+                      out[i] += (float) Math.sin(2 * Math.PI * (90 - 40 * t) * i / RATE) * (1 - t) * 0.5f;
+                  }
+                  addBell(out, (int) (0.05f * RATE), midi(81), 0.45f, 0.15f, false);
+                  addBell(out, (int) (0.13f * RATE), midi(88), 0.45f, 0.13f, false);
+                  return out;
+              }
+
+              // ------------------------------------------------------------------ music
+
+              /**
+               * A calm, original music-box loop (about 53 seconds).
+               * Notes that ring past the end wrap around to the start, so the loop is seamless.
+               */
+              static float[] music() {
+                  final float bpm = 72f;
+                  final float beat = 60f / bpm;
+                  final int bars = 16;
+                  final int total = (int) (bars * 4 * beat * RATE);
+                  float[] out = new float[total];
+                  // C, Am, F, G   then   C, Em, F, G
+                  int[][] chords = {
+                          {48, 52, 55, 59}, {45, 48, 52, 55}, {41, 45, 48, 52}, {43, 47, 50, 55},
+                          {48, 52, 55, 59}, {40, 43, 47, 50}, {41, 45, 48, 52}, {43, 47, 50, 53},
+                  };
+                  int[] scale = {72, 74, 76, 79, 81, 84, 86, 88};
+                  Random r = new Random(2026);
+                  int lastNote = 76;
+                  for (int bar = 0; bar < bars; bar++) {
+                      int[] ch = chords[bar % chords.length];
+                      int barStart = (int) (bar * 4 * beat * RATE);
+
+                      // Warm pad
+                      for (int k = 1; k < 4; k++) addPad(out, barStart, (int) (4 * beat * RATE), midi(ch[k] + 12), 0.035f);
+                      // Soft bass on beats 1 and 3
+                      addBass(out, barStart, midi(ch[0] - 12), 0.16f, 1.6f * beat);
+                      addBass(out, barStart + (int) (2 * beat * RATE), midi(ch[0] - 12 + (bar % 2 == 0 ? 7 : 0)), 0.11f, 1.6f * beat);
+
+                      // Melody: eighth notes, mostly chord tones, with breathing room
+                      boolean quietBar = bar % 4 == 3;
+                      for (int e = 0; e < 8; e++) {
+                          float chance = quietBar ? (e < 3 ? 0.7f : 0.15f) : (e % 2 == 0 ? 0.85f : 0.45f);
+                          if (bar == bars - 1 && e > 2) chance = 0;
+                          if (r.nextFloat() > chance) continue;
+                          int note;
+                          if (e == 0 || r.nextFloat() < 0.55f) {
+                              int tone = ch[1 + r.nextInt(3)];
+                              note = tone;
+                              while (note < 72) note += 12;
+                              while (note > 89) note -= 12;
+                          } else {
+                              int best = scale[0];
+                              int bestD = 99;
+                              for (int s : scale) {
+                                  int d = Math.abs(s - lastNote) + (s == lastNote ? 3 : 0) + r.nextInt(4);
+                                  if (d < bestD) { bestD = d; best = s; }
+                              }
+                              note = best;
+                          }
+                          if (bar == bars - 1 && e == 0) note = 84;
+                          lastNote = note;
+                          int at = barStart + (int) (e * beat / 2 * RATE);
+                          addBell(out, at, midi(note), 1.6f, 0.17f, true);
+                          // little sparkle an octave up now and then
+                          if (r.nextFloat() < 0.12f) addBell(out, at, midi(note + 12), 0.8f, 0.05f, true);
+                      }
+                  }
+                  normalize(out, 0.8f);
+                  return out;
+              }
+
+              // ------------------------------------------------------------------ building blocks
+
+              static double midi(int m) {
+                  return 440.0 * Math.pow(2, (m - 69) / 12.0);
+              }
+
+              /** Music-box style bell: bright attack, slow fade. If wrap is true, tails loop to the start. */
+              static void addBell(float[] out, int start, double f, float seconds, float amp, boolean wrap) {
+                  int n = (int) (seconds * RATE);
+                  double w = 2 * Math.PI * f / RATE;
+                  double decay = Math.exp(-4.5 / n);
+                  double env = 1;
+                  for (int i = 0; i < n; i++) {
+                      int idx = start + i;
+                      if (idx >= out.length) {
+                          if (!wrap) break;
+                          idx %= out.length;
+                      }
+                      float attack = i < 60 ? i / 60f : 1f;
+                      double s = Math.sin(w * i) + 0.32 * Math.sin(2 * w * i) * env + 0.1 * Math.sin(3.01 * w * i) * env * env;
+                      out[idx] += (float) (s * env * amp * attack);
+                      env *= decay;
+                  }
+              }
+
+              static void addPad(float[] out, int start, int n, double f, float amp) {
+                  double w = 2 * Math.PI * f / RATE;
+                  int fade = (int) (0.6f * RATE);
+                  for (int i = 0; i < n + fade; i++) {
+                      int idx = (start + i) % out.length;
+                      float env;
+                      if (i < fade) env = i / (float) fade;
+                      else if (i < n) env = 1;
+                      else env = 1 - (i - n) / (float) fade;
+                      double vib = 1 + 0.002 * Math.sin(i * 2 * Math.PI * 4.5 / RATE);
+                      out[idx] += (float) ((Math.sin(w * i * vib) + 0.2 * Math.sin(2 * w * i)) * env * amp);
+                  }
+              }
+
+              static void addBass(float[] out, int start, double f, float amp, float seconds) {
+                  int n = (int) (seconds * RATE);
+                  double w = 2 * Math.PI * f / RATE;
+                  for (int i = 0; i < n; i++) {
+                      int idx = (start + i) % out.length;
+                      float t = i / (float) n;
+                      float env = Math.min(1, i / 300f) * (float) Math.pow(1 - t, 1.5);
+                      out[idx] += (float) (Math.sin(w * i) * env * amp);
+                  }
+              }
+
+              static void normalize(float[] out, float target) {
+                  float peak = 0.0001f;
+                  for (float v : out) peak = Math.max(peak, Math.abs(v));
+                  float k = target / peak;
+                  for (int i = 0; i < out.length; i++) out[i] *= k;
+              }
+
+              static void writeWav(File f, float[] data) throws IOException {
+                  int bytes = data.length * 2;
+                  try (OutputStream os = new BufferedOutputStream(new FileOutputStream(f))) {
+                      os.write(new byte[]{'R', 'I', 'F', 'F'});
+                      le32(os, 36 + bytes);
+                      os.write(new byte[]{'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+                      le32(os, 16);
+                      le16(os, 1);
+                      le16(os, 1);
+                      le32(os, RATE);
+                      le32(os, RATE * 2);
+                      le16(os, 2);
+                      le16(os, 16);
+                      os.write(new byte[]{'d', 'a', 't', 'a'});
+                      le32(os, bytes);
+                      byte[] buf = new byte[4096];
+                      int bi = 0;
+                      for (float v : data) {
+                          int s = (int) (Math.max(-1f, Math.min(1f, v)) * 32767);
+                          buf[bi++] = (byte) (s & 0xff);
+                          buf[bi++] = (byte) ((s >> 8) & 0xff);
+                          if (bi == buf.length) { os.write(buf); bi = 0; }
+                      }
+                      if (bi > 0) os.write(buf, 0, bi);
+                  }
+              }
+
+              private static void le32(OutputStream os, int v) throws IOException {
+                  os.write(v & 0xff); os.write((v >> 8) & 0xff); os.write((v >> 16) & 0xff); os.write((v >> 24) & 0xff);
+              }
+
+              private static void le16(OutputStream os, int v) throws IOException {
+                  os.write(v & 0xff); os.write((v >> 8) & 0xff);
+              }
+          }
+          SNOW_EOF
+          mkdir -p app/src/main/java/com/josh/snowisland
+          cat > app/src/main/java/com/josh/snowisland/Weather.java <<'SNOW_EOF'
+          package com.josh.snowisland;
+
+          import org.json.JSONObject;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.Locale;
+
+          /**
+           * Current local weather. Location comes from your internet connection (city level, no GPS);
+           * the weather itself comes from Open-Meteo, a free weather service that needs no account.
+           */
+          final class Weather {
+              static final int NONE = 0, SNOW = 1, RAIN = 2;
+
+              boolean ok;
+              String city = "";
+              float tempC;
+              int code;
+              float windKmh;
+              float windFromDeg;
+
+              // What the island should do with it
+              int precip = SNOW;
+              float intensity = 0.35f;
+              float cloud;
+              float fog;
+              boolean thunder;
+              String desc = "";
+              String emoji = "";
+
+              static Weather fetch() {
+                  Weather w = new Weather();
+                  try {
+                      double lat, lon;
+                      String city;
+                      try {
+                          JSONObject loc = new JSONObject(get("https://get.geojs.io/v1/ip/geo.json"));
+                          lat = loc.optDouble("latitude");
+                          lon = loc.optDouble("longitude");
+                          city = loc.optString("city", "");
+                      } catch (Exception first) {
+                          JSONObject loc = new JSONObject(get("https://ipapi.co/json/"));
+                          lat = loc.optDouble("latitude");
+                          lon = loc.optDouble("longitude");
+                          city = loc.optString("city", "");
+                      }
+                      if (Double.isNaN(lat) || Double.isNaN(lon)) return w;
+                      String url = String.format(Locale.US,
+                              "https://api.open-meteo.com/v1/forecast?latitude=%.3f&longitude=%.3f"
+                                      + "&current=temperature_2m,weather_code,wind_speed_10m,wind_direction_10m&timezone=auto",
+                              lat, lon);
+                      JSONObject cur = new JSONObject(get(url)).getJSONObject("current");
+                      w.city = city;
+                      w.tempC = (float) cur.optDouble("temperature_2m", 0);
+                      w.code = cur.optInt("weather_code", 0);
+                      w.windKmh = (float) cur.optDouble("wind_speed_10m", 0);
+                      w.windFromDeg = (float) cur.optDouble("wind_direction_10m", 0);
+                      w.ok = true;
+                      w.interpret();
+                  } catch (Exception ignored) {
+                      w.ok = false;
+                  }
+                  return w;
+              }
+
+              void interpret() {
+                  precip = NONE; intensity = 0; cloud = 0; fog = 0; thunder = false;
+                  switch (code) {
+                      case 0: desc = "Clear"; emoji = "☀️"; break;
+                      case 1: desc = "Mostly clear"; emoji = "🌤"; cloud = 0.05f; break;
+                      case 2: desc = "Partly cloudy"; emoji = "⛅"; cloud = 0.15f; break;
+                      case 3: desc = "Overcast"; emoji = "☁️"; cloud = 0.3f; break;
+                      case 45: case 48: desc = "Fog"; emoji = "🌫"; fog = 0.35f; cloud = 0.2f; break;
+                      case 51: rain(0.3f, "Light drizzle"); break;
+                      case 53: rain(0.45f, "Drizzle"); break;
+                      case 55: rain(0.6f, "Heavy drizzle"); break;
+                      case 56: case 57: rain(0.45f, "Freezing drizzle"); break;
+                      case 61: rain(0.4f, "Light rain"); break;
+                      case 63: rain(0.7f, "Rain"); break;
+                      case 65: rain(1f, "Heavy rain"); break;
+                      case 66: case 67: rain(0.75f, "Freezing rain"); break;
+                      case 71: snow(0.35f, "Light snow"); break;
+                      case 73: snow(0.65f, "Snow"); break;
+                      case 75: snow(1f, "Heavy snow"); break;
+                      case 77: snow(0.3f, "Snow grains"); break;
+                      case 80: rain(0.5f, "Rain showers"); break;
+                      case 81: rain(0.75f, "Rain showers"); break;
+                      case 82: rain(1f, "Heavy showers"); break;
+                      case 85: snow(0.6f, "Snow showers"); break;
+                      case 86: snow(1f, "Heavy snow showers"); break;
+                      case 95: case 96: case 99:
+                          rain(0.9f, "Thunderstorm"); thunder = true; emoji = "⛈"; break;
+                      default: desc = "—"; emoji = "🌡"; break;
+                  }
+              }
+
+              private void rain(float i, String d) {
+                  precip = RAIN; intensity = i; cloud = 0.25f; desc = d; emoji = "🌧";
+              }
+
+              private void snow(float i, String d) {
+                  precip = SNOW; intensity = i; cloud = 0.2f; desc = d; emoji = "🌨";
+              }
+
+              private static String get(String u) throws Exception {
+                  HttpURLConnection con = (HttpURLConnection) new URL(u).openConnection();
+                  con.setConnectTimeout(8000);
+                  con.setReadTimeout(8000);
+                  con.setRequestProperty("User-Agent", "SnowIsland/2");
+                  try (InputStream in = con.getInputStream()) {
+                      ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                      byte[] buf = new byte[4096];
+                      int n;
+                      while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                      return bo.toString("UTF-8");
+                  } finally {
+                      con.disconnect();
                   }
               }
           }
