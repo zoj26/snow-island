@@ -1,0 +1,1122 @@
+# Snow Island - a walk-around home screen for Android TV.
+# This one file holds the whole app. Every time you save a change to it,
+# GitHub builds a new SnowIsland.apk and posts it under Releases.
+name: Build Snow Island
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Write the app's files
+        run: |
+          mkdir -p app
+          cat > app/settings.gradle <<'SNOW_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SnowIsland"
+          SNOW_EOF
+          cat > app/build.gradle <<'SNOW_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2'
+          }
+
+          android {
+              namespace 'com.josh.snowisland'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.josh.snowisland'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode((System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger())
+                  versionName "1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+              }
+
+              signingConfigs {
+                  stable {
+                      storeFile file('../signing/snowisland.keystore')
+                      storePassword 'snowisland'
+                      keyAlias 'snowisland'
+                      keyPassword 'snowisland'
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.stable
+                  }
+              }
+
+              lint {
+                  checkReleaseBuilds false
+                  abortOnError false
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          SNOW_EOF
+          cat > app/gradle.properties <<'SNOW_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          SNOW_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'SNOW_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:label="Snow Island"
+                  android:icon="@drawable/icon"
+                  android:banner="@drawable/banner"
+                  android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:screenOrientation="landscape"
+                      android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          SNOW_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/icon.xml <<'SNOW_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#2F78B8" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#F5FAFD" android:pathData="M4,80a50,22 0,1 0,100 0a50,22 0,1 0,-100 0z" />
+              <path android:fillColor="#1B2230" android:pathData="M38,84a16,26 0,1 0,32 0a16,26 0,1 0,-32 0z" />
+              <path android:fillColor="#1B2230" android:pathData="M42,52a12,12 0,1 0,24 0a12,12 0,1 0,-24 0z" />
+              <path android:fillColor="#FAFCFF" android:pathData="M43,88a11,18 0,1 0,22 0a11,18 0,1 0,-22 0z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M45.5,50a3.5,3.5 0,1 0,7 0a3.5,3.5 0,1 0,-7 0zM55.5,50a3.5,3.5 0,1 0,7 0a3.5,3.5 0,1 0,-7 0z" />
+              <path android:fillColor="#111111" android:pathData="M47.5,50.5a1.7,1.7 0,1 0,3.4 0a1.7,1.7 0,1 0,-3.4 0zM57.1,50.5a1.7,1.7 0,1 0,3.4 0a1.7,1.7 0,1 0,-3.4 0z" />
+              <path android:fillColor="#FFA726" android:pathData="M50.5,55h7l-3.5,5z" />
+              <path android:fillColor="#FF5252" android:pathData="M41,61h26v6h-26zM58,64h6v12h-6zM42,44a12,10 0,0 1,24 0z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M54,33a4,4 0,1 0,0.1 0z" />
+          </vector>
+          SNOW_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/banner.xml <<'SNOW_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="320dp" android:height="180dp"
+              android:viewportWidth="320" android:viewportHeight="180">
+              <path android:fillColor="#2F78B8" android:pathData="M0,0h320v180h-320z" />
+              <path android:fillColor="#F5FAFD" android:pathData="M20,150a140,34 0,1 0,280 0a140,34 0,1 0,-280 0z" />
+              <path android:fillColor="#2E6B4A" android:pathData="M40,140l18,-40l18,40zM250,138l16,-36l16,36z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M50,118l8,-18l8,18zM259,118l7,-16l7,16z" />
+              <path android:fillColor="#1B2230" android:pathData="M148,140a14,24 0,1 0,28 0a14,24 0,1 0,-28 0zM151,110a11,11 0,1 0,22 0a11,11 0,1 0,-22 0z" />
+              <path android:fillColor="#FAFCFF" android:pathData="M152,144a10,16 0,1 0,20 0a10,16 0,1 0,-20 0z" />
+              <path android:fillColor="#FFA726" android:pathData="M158,113h8l-4,5z" />
+              <path android:fillColor="#FF5252" android:pathData="M150,119h24v5h-24zM151,103a11,9 0,0 1,22 0z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M155,108a2.5,2.5 0,1 0,5 0a2.5,2.5 0,1 0,-5 0zM164,108a2.5,2.5 0,1 0,5 0a2.5,2.5 0,1 0,-5 0z" />
+          </vector>
+          SNOW_EOF
+          mkdir -p app/src/main/java/com/josh/snowisland
+          cat > app/src/main/java/com/josh/snowisland/MainActivity.java <<'SNOW_EOF'
+          package com.josh.snowisland;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Bitmap;
+          import android.graphics.Canvas;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.RadialGradient;
+          import android.graphics.Rect;
+          import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.Drawable;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.InputDevice;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.view.SurfaceHolder;
+          import android.view.SurfaceView;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Toast;
+
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Calendar;
+          import java.util.Collections;
+          import java.util.HashMap;
+          import java.util.LinkedHashMap;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.Random;
+
+          /**
+           * Snow Island: a home screen you walk around.
+           * Your penguin waddles around a snowy island; every app is another penguin.
+           * Walk up to one and press OK to open that app.
+           */
+          public class MainActivity extends Activity implements SurfaceHolder.Callback {
+
+              // The game draws at 1280x720 and the TV scales it up. Much lighter on the chip than 4K.
+              static final int VW = 1280, VH = 720;
+              // World size and the island (an ellipse in the middle of the ocean)
+              static final float WW = 2400, WH = 1600, CX = 1200, CY = 800, RX = 1050, RY = 680;
+              // Big igloo in the middle
+              static final float IGLOO_X = CX, IGLOO_Y = CY - 20;
+
+              static final int DOWN = 0, UP = 1, LEFT = 2, RIGHT = 3;
+              static final float PLAYER_SPEED = 230f;
+              static final float NEAR_DIST = 95f;
+
+              static final int[] SCARVES = {
+                      0xffe53935, 0xff1e88e5, 0xff43a047, 0xfffdd835, 0xff8e24aa,
+                      0xfffb8c00, 0xff00acc1, 0xffd81b60, 0xff6d4c41, 0xff3949ab,
+                      0xff7cb342, 0xfff4511e
+              };
+              static final int PLAYER_SCARF = 0xffff5252;
+
+              static class AppPeng {
+                  String pkg, label;
+                  Intent intent;
+                  Bitmap icon;
+                  int scarf;
+                  float hx, hy, x, y, tx, ty, wait, phase;
+                  int facing = DOWN;
+                  boolean moving;
+              }
+
+              SurfaceView view;
+              SurfaceHolder holder;
+              volatile boolean running;
+              Thread renderThread;
+              final Object lock = new Object();
+
+              // Input (written by the UI thread, read by the render thread)
+              volatile boolean kUp, kDown, kLeft, kRight;
+              volatile float axX, axY;
+              volatile boolean okPressed;
+
+              // Player
+              float px = CX, py = CY + 120;
+              int facing = DOWN;
+              float walkPhase;
+              boolean moving;
+
+              // World
+              Bitmap world;
+              volatile List<AppPeng> apps = new ArrayList<>();
+              final Map<String, AppPeng> byPkg = new HashMap<>();
+              float[] waveX, waveY, wavePh;
+              float[] snowX, snowY, snowSpd, snowR;
+              final float[] trailX = new float[40], trailY = new float[40], trailAge = new float[40];
+              int trailHead;
+              float trailDist;
+
+              AppPeng launching;
+              float launchT;
+              float time;
+              long lastNs;
+
+              final Random rnd = new Random();
+              final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+              final Path path = new Path();
+              final RectF rf = new RectF();
+              final Rect src = new Rect(), dst = new Rect();
+              final ArrayList<Object> drawList = new ArrayList<>();
+              final SimpleDateFormat timeFmt = new SimpleDateFormat("h:mm", Locale.getDefault());
+              final SimpleDateFormat dateFmt = new SimpleDateFormat("EEE, MMM d", Locale.getDefault());
+
+              // ------------------------------------------------------------------ lifecycle
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN
+                          | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  view = new SurfaceView(this);
+                  holder = view.getHolder();
+                  holder.setFixedSize(VW, VH);
+                  holder.addCallback(this);
+                  view.setFocusable(true);
+                  setContentView(view);
+                  view.requestFocus();
+
+                  tp.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+                  bakeWorld();
+                  initParticles();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  hideSystemUi();
+                  kUp = kDown = kLeft = kRight = false;
+                  axX = axY = 0;
+                  loadApps();
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) hideSystemUi();
+              }
+
+              @SuppressWarnings("deprecation")
+              void hideSystemUi() {
+                  view.setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                          | View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+              }
+
+              @Override
+              public void surfaceCreated(SurfaceHolder h) {
+                  running = true;
+                  lastNs = System.nanoTime();
+                  renderThread = new Thread(this::renderLoop, "island-render");
+                  renderThread.start();
+              }
+
+              @Override
+              public void surfaceChanged(SurfaceHolder h, int format, int w, int hgt) { }
+
+              @Override
+              public void surfaceDestroyed(SurfaceHolder h) {
+                  running = false;
+                  if (renderThread != null) {
+                      try { renderThread.join(500); } catch (InterruptedException ignored) { }
+                      renderThread = null;
+                  }
+              }
+
+              // ------------------------------------------------------------------ input
+
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent e) {
+                  boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+                  switch (e.getKeyCode()) {
+                      case KeyEvent.KEYCODE_DPAD_UP:
+                      case KeyEvent.KEYCODE_W:
+                          kUp = down; return true;
+                      case KeyEvent.KEYCODE_DPAD_DOWN:
+                      case KeyEvent.KEYCODE_S:
+                          kDown = down; return true;
+                      case KeyEvent.KEYCODE_DPAD_LEFT:
+                      case KeyEvent.KEYCODE_A:
+                          kLeft = down; return true;
+                      case KeyEvent.KEYCODE_DPAD_RIGHT:
+                      case KeyEvent.KEYCODE_D:
+                          kRight = down; return true;
+                      case KeyEvent.KEYCODE_DPAD_CENTER:
+                      case KeyEvent.KEYCODE_ENTER:
+                      case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                      case KeyEvent.KEYCODE_BUTTON_A:
+                          if (down && e.getRepeatCount() == 0) okPressed = true;
+                          return true;
+                      case KeyEvent.KEYCODE_BACK:
+                      case KeyEvent.KEYCODE_BUTTON_B:
+                          if (!down) finish();
+                          return true;
+                  }
+                  return super.dispatchKeyEvent(e);
+              }
+
+              @Override
+              public boolean dispatchGenericMotionEvent(MotionEvent e) {
+                  if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                          && e.getAction() == MotionEvent.ACTION_MOVE) {
+                      float x = e.getAxisValue(MotionEvent.AXIS_X);
+                      float y = e.getAxisValue(MotionEvent.AXIS_Y);
+                      float hx = e.getAxisValue(MotionEvent.AXIS_HAT_X);
+                      float hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y);
+                      if (Math.abs(hx) > 0.5f) x = hx;
+                      if (Math.abs(hy) > 0.5f) y = hy;
+                      axX = Math.abs(x) > 0.25f ? x : 0;
+                      axY = Math.abs(y) > 0.25f ? y : 0;
+                      return true;
+                  }
+                  return super.dispatchGenericMotionEvent(e);
+              }
+
+              // ------------------------------------------------------------------ apps
+
+              void loadApps() {
+                  new Thread(() -> {
+                      PackageManager pm = getPackageManager();
+                      LinkedHashMap<String, AppPeng> found = new LinkedHashMap<>();
+                      String[] cats = {Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER};
+                      for (String cat : cats) {
+                          Intent q = new Intent(Intent.ACTION_MAIN);
+                          q.addCategory(cat);
+                          List<ResolveInfo> list;
+                          try { list = pm.queryIntentActivities(q, 0); } catch (Exception ex) { continue; }
+                          for (ResolveInfo ri : list) {
+                              String pk = ri.activityInfo.packageName;
+                              if (pk.equals(getPackageName()) || found.containsKey(pk)) continue;
+                              AppPeng a = new AppPeng();
+                              a.pkg = pk;
+                              a.label = String.valueOf(ri.loadLabel(pm));
+                              Intent li = cat.equals(Intent.CATEGORY_LEANBACK_LAUNCHER)
+                                      ? pm.getLeanbackLaunchIntentForPackage(pk)
+                                      : pm.getLaunchIntentForPackage(pk);
+                              if (li == null) {
+                                  li = new Intent(Intent.ACTION_MAIN);
+                                  li.addCategory(cat);
+                                  li.setClassName(pk, ri.activityInfo.name);
+                              }
+                              a.intent = li;
+                              try { a.icon = toBitmap(ri.loadIcon(pm), 72); } catch (Exception ex) { a.icon = null; }
+                              found.put(pk, a);
+                          }
+                      }
+                      AppPeng s = new AppPeng();
+                      s.pkg = "__settings";
+                      s.label = "Settings";
+                      s.intent = new Intent(Settings.ACTION_SETTINGS);
+                      s.icon = makeGearIcon(72);
+                      found.put(s.pkg, s);
+
+                      List<AppPeng> list = new ArrayList<>(found.values());
+                      Collections.sort(list, (a, b) -> a.label.compareToIgnoreCase(b.label));
+                      layoutApps(list);
+                      synchronized (lock) {
+                          for (AppPeng a : list) {
+                              AppPeng old = byPkg.get(a.pkg);
+                              if (old != null && old.hx == a.hx && old.hy == a.hy) {
+                                  a.x = old.x; a.y = old.y; a.tx = old.tx; a.ty = old.ty;
+                                  a.facing = old.facing; a.phase = old.phase;
+                              }
+                          }
+                          byPkg.clear();
+                          for (AppPeng a : list) byPkg.put(a.pkg, a);
+                          apps = list;
+                      }
+                  }, "island-apps").start();
+              }
+
+              /** Places app penguins on rings around the igloo. Same app list = same spots every time. */
+              void layoutApps(List<AppPeng> list) {
+                  float[] ring = {0.30f, 0.50f, 0.67f, 0.81f};
+                  int[] cap = {6, 10, 14, 1000};
+                  int idx = 0, n = list.size();
+                  Random r = new Random(42);
+                  for (int k = 0; k < ring.length && idx < n; k++) {
+                      int count = Math.min(cap[k], n - idx);
+                      double offset = Math.PI / count * 0.5 + k * 0.45;
+                      for (int j = 0; j < count; j++, idx++) {
+                          AppPeng a = list.get(idx);
+                          double ang = offset + 2 * Math.PI * j / count;
+                          a.hx = CX + (float) Math.cos(ang) * RX * ring[k];
+                          a.hy = CY + (float) Math.sin(ang) * RY * ring[k];
+                          a.x = a.tx = a.hx;
+                          a.y = a.ty = a.hy;
+                          a.wait = r.nextFloat() * 3f;
+                          a.phase = r.nextFloat() * 6f;
+                          a.scarf = SCARVES[(a.pkg.hashCode() & 0x7fffffff) % SCARVES.length];
+                      }
+                  }
+              }
+
+              Bitmap toBitmap(Drawable d, int size) {
+                  Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                  Canvas c = new Canvas(b);
+                  d.setBounds(0, 0, size, size);
+                  d.draw(c);
+                  return b;
+              }
+
+              Bitmap makeGearIcon(int size) {
+                  Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                  Canvas c = new Canvas(b);
+                  Paint g = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  float m = size / 2f;
+                  g.setColor(0xff546e7a);
+                  for (int i = 0; i < 8; i++) {
+                      c.save();
+                      c.rotate(i * 45f, m, m);
+                      c.drawRect(m - size * 0.08f, m - size * 0.44f, m + size * 0.08f, m - size * 0.2f, g);
+                      c.restore();
+                  }
+                  c.drawCircle(m, m, size * 0.3f, g);
+                  g.setColor(0xffffffff);
+                  c.drawCircle(m, m, size * 0.12f, g);
+                  return b;
+              }
+
+              void launch(AppPeng a) {
+                  runOnUiThread(() -> {
+                      try {
+                          Intent i = new Intent(a.intent);
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          startActivity(i);
+                      } catch (Exception ex) {
+                          Toast.makeText(this, "Couldn't open " + a.label, Toast.LENGTH_SHORT).show();
+                      }
+                  });
+              }
+
+              // ------------------------------------------------------------------ world (drawn once)
+
+              void bakeWorld() {
+                  world = Bitmap.createBitmap((int) WW, (int) WH, Bitmap.Config.RGB_565);
+                  Canvas c = new Canvas(world);
+                  Paint w = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  Random r = new Random(7);
+
+                  // Ocean
+                  w.setShader(new LinearGradient(0, 0, 0, WH, 0xff2f78b8, 0xff123f6c, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 0, WW, WH, w);
+                  w.setShader(null);
+                  // Shallow water + ice shelf
+                  w.setColor(0xff4a97cf);
+                  c.drawOval(CX - RX - 70, CY - RY - 55, CX + RX + 70, CY + RY + 55, w);
+                  w.setColor(0xffcfe7f4);
+                  c.drawOval(CX - RX - 20, CY - RY - 16, CX + RX + 20, CY + RY + 16, w);
+                  // Snow
+                  w.setShader(new RadialGradient(CX, CY - 80, RX, 0xffffffff, 0xffe3eff7, Shader.TileMode.CLAMP));
+                  c.drawOval(CX - RX, CY - RY, CX + RX, CY + RY, w);
+                  w.setShader(null);
+
+                  // Soft snow drifts
+                  w.setColor(0xffe6f0f7);
+                  for (int i = 0; i < 55; i++) {
+                      float[] pt = randomOnIsland(r, 0.1f, 0.9f);
+                      float dw = 50 + r.nextFloat() * 110, dh = 14 + r.nextFloat() * 26;
+                      c.drawOval(pt[0] - dw, pt[1] - dh, pt[0] + dw, pt[1] + dh, w);
+                  }
+
+                  // Rocks on the ice shelf
+                  for (int i = 0; i < 26; i++) {
+                      float[] pt = randomOnIsland(r, 0.97f, 1.015f);
+                      float s = 0.6f + r.nextFloat() * 0.9f;
+                      w.setColor(0xff7d8a95);
+                      c.drawOval(pt[0] - 18 * s, pt[1] - 11 * s, pt[0] + 18 * s, pt[1] + 9 * s, w);
+                      w.setColor(0xffffffff);
+                      c.drawOval(pt[0] - 12 * s, pt[1] - 12 * s, pt[0] + 8 * s, pt[1] - 4 * s, w);
+                  }
+
+                  // Trees and snowmen around the edge, drawn back-to-front
+                  ArrayList<float[]> things = new ArrayList<>();
+                  for (int i = 0; i < 70; i++) {
+                      float[] pt = randomOnIsland(r, 0.88f, 0.97f);
+                      things.add(new float[]{pt[0], pt[1], 0.8f + r.nextFloat() * 0.6f, 0});
+                  }
+                  for (int i = 0; i < 4; i++) {
+                      float[] pt = randomOnIsland(r, 0.86f, 0.88f);
+                      things.add(new float[]{pt[0], pt[1], 1f, 1});
+                  }
+                  Collections.sort(things, (a, b) -> Float.compare(a[1], b[1]));
+                  for (float[] t : things) {
+                      if (t[3] == 0) drawTree(c, w, t[0], t[1], t[2]);
+                      else drawSnowman(c, w, t[0], t[1]);
+                  }
+
+                  drawIgloo(c, w, IGLOO_X, IGLOO_Y);
+              }
+
+              float[] randomOnIsland(Random r, float minF, float maxF) {
+                  double ang = r.nextDouble() * Math.PI * 2;
+                  float f = minF + r.nextFloat() * (maxF - minF);
+                  return new float[]{CX + (float) Math.cos(ang) * RX * f, CY + (float) Math.sin(ang) * RY * f};
+              }
+
+              void drawTree(Canvas c, Paint w, float x, float y, float s) {
+                  w.setColor(0x22000000);
+                  c.drawOval(x - 30 * s, y - 8 * s, x + 30 * s, y + 8 * s, w);
+                  w.setColor(0xff6d4c41);
+                  c.drawRect(x - 5 * s, y - 16 * s, x + 5 * s, y, w);
+                  float base = y - 12 * s;
+                  float[] widths = {34, 27, 19};
+                  float[] heights = {40, 34, 28};
+                  for (int i = 0; i < 3; i++) {
+                      float hw = widths[i] * s, h = heights[i] * s;
+                      path.reset();
+                      path.moveTo(x - hw, base);
+                      path.lineTo(x + hw, base);
+                      path.lineTo(x, base - h);
+                      path.close();
+                      w.setColor(i == 1 ? 0xff357a54 : 0xff2e6b4a);
+                      c.drawPath(path, w);
+                      path.reset();
+                      path.moveTo(x - hw * 0.45f, base - h * 0.55f);
+                      path.lineTo(x + hw * 0.45f, base - h * 0.55f);
+                      path.lineTo(x, base - h);
+                      path.close();
+                      w.setColor(0xfff7fbff);
+                      c.drawPath(path, w);
+                      base -= h * 0.55f;
+                  }
+              }
+
+              void drawSnowman(Canvas c, Paint w, float x, float y) {
+                  w.setColor(0x22000000);
+                  c.drawOval(x - 24, y - 7, x + 24, y + 7, w);
+                  w.setColor(0xffffffff);
+                  c.drawCircle(x, y - 20, 20, w);
+                  c.drawCircle(x, y - 50, 14, w);
+                  w.setColor(0xff263238);
+                  c.drawCircle(x - 5, y - 53, 2, w);
+                  c.drawCircle(x + 5, y - 53, 2, w);
+                  c.drawCircle(x, y - 26, 2, w);
+                  c.drawCircle(x, y - 16, 2, w);
+                  w.setColor(0xffff7043);
+                  path.reset();
+                  path.moveTo(x, y - 50);
+                  path.lineTo(x + 12, y - 47);
+                  path.lineTo(x, y - 45);
+                  path.close();
+                  c.drawPath(path, w);
+              }
+
+              void drawIgloo(Canvas c, Paint w, float x, float y) {
+                  w.setStyle(Paint.Style.FILL);
+                  w.setColor(0x26000000);
+                  c.drawOval(x - 140, y - 22, x + 140, y + 22, w);
+                  // Dome
+                  rf.set(x - 125, y - 125, x + 125, y + 125);
+                  w.setColor(0xfffbfdff);
+                  c.drawArc(rf, 180, 180, true, w);
+                  // Ice block lines
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setStrokeWidth(2.5f);
+                  w.setColor(0xffb7d2e4);
+                  c.drawArc(rf, 180, 180, false, w);
+                  for (int row = 1; row <= 4; row++) {
+                      float ly = y - row * 25;
+                      float half = (float) Math.sqrt(Math.max(0, 125 * 125 - (row * 25) * (row * 25)));
+                      c.drawLine(x - half, ly, x + half, ly, w);
+                      int blocks = 6 - row;
+                      for (int b = 0; b <= blocks; b++) {
+                          float bx = x - half + (2 * half) * (b + (row % 2) * 0.5f) / (blocks + 1);
+                          if (bx > x - half + 4 && bx < x + half - 4) c.drawLine(bx, ly, bx, ly + 25, w);
+                      }
+                  }
+                  // Tunnel entrance
+                  w.setStyle(Paint.Style.FILL);
+                  rf.set(x - 48, y - 58, x + 48, y + 38);
+                  w.setColor(0xffffffff);
+                  c.drawArc(rf, 180, 180, true, w);
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setColor(0xffb7d2e4);
+                  c.drawArc(rf, 180, 180, false, w);
+                  w.setStyle(Paint.Style.FILL);
+                  rf.set(x - 26, y - 38, x + 26, y + 14);
+                  w.setColor(0xff2c3e50);
+                  c.drawArc(rf, 180, 180, true, w);
+                  w.setStrokeWidth(0);
+              }
+
+              void initParticles() {
+                  Random r = new Random(3);
+                  int nw = 0;
+                  waveX = new float[180]; waveY = new float[180]; wavePh = new float[180];
+                  while (nw < 180) {
+                      float x = r.nextFloat() * WW, y = r.nextFloat() * WH;
+                      float ex = (x - CX) / (RX + 80), ey = (y - CY) / (RY + 65);
+                      if (ex * ex + ey * ey < 1f) continue;
+                      waveX[nw] = x; waveY[nw] = y; wavePh[nw] = r.nextFloat() * 6.28f;
+                      nw++;
+                  }
+                  int ns = 110;
+                  snowX = new float[ns]; snowY = new float[ns]; snowSpd = new float[ns]; snowR = new float[ns];
+                  for (int i = 0; i < ns; i++) {
+                      snowX[i] = r.nextFloat() * VW;
+                      snowY[i] = r.nextFloat() * VH;
+                      snowSpd[i] = 25 + r.nextFloat() * 45;
+                      snowR[i] = 1.2f + r.nextFloat() * 2f;
+                  }
+              }
+
+              // ------------------------------------------------------------------ loop
+
+              void renderLoop() {
+                  while (running) {
+                      Canvas c = null;
+                      try { c = holder.lockHardwareCanvas(); } catch (Exception ignored) { }
+                      if (c == null) {
+                          try { c = holder.lockCanvas(); } catch (Exception ignored) { }
+                      }
+                      if (c == null) {
+                          try { Thread.sleep(16); } catch (InterruptedException ignored) { }
+                          continue;
+                      }
+                      try {
+                          long now = System.nanoTime();
+                          float dt = Math.min(0.05f, (now - lastNs) / 1e9f);
+                          lastNs = now;
+                          time += dt;
+                          List<AppPeng> list;
+                          synchronized (lock) { list = apps; }
+                          update(dt, list);
+                          draw(c, list);
+                      } finally {
+                          try { holder.unlockCanvasAndPost(c); } catch (Exception ignored) { }
+                      }
+                  }
+              }
+
+              AppPeng nearest(List<AppPeng> list) {
+                  AppPeng best = null;
+                  float bd = NEAR_DIST * NEAR_DIST;
+                  for (AppPeng a : list) {
+                      float dx = a.x - px, dy = a.y - py;
+                      float d = dx * dx + dy * dy;
+                      if (d < bd) { bd = d; best = a; }
+                  }
+                  return best;
+              }
+
+              void update(float dt, List<AppPeng> list) {
+                  // Launch animation: a little hop, then open the app
+                  if (launching != null) {
+                      launchT += dt;
+                      if (launchT > 0.35f) {
+                          launch(launching);
+                          launching = null;
+                      }
+                      okPressed = false;
+                      moving = false;
+                  } else {
+                      float dx = (kRight ? 1 : 0) - (kLeft ? 1 : 0) + axX;
+                      float dy = (kDown ? 1 : 0) - (kUp ? 1 : 0) + axY;
+                      float len = (float) Math.sqrt(dx * dx + dy * dy);
+                      moving = len > 0.2f;
+                      if (moving) {
+                          if (len > 1) { dx /= len; dy /= len; }
+                          float nx = px + dx * PLAYER_SPEED * dt;
+                          float ny = py + dy * PLAYER_SPEED * dt;
+                          // Stay on the island
+                          float ex = (nx - CX) / (RX - 35), ey = (ny - CY) / (RY - 30);
+                          float e = ex * ex + ey * ey;
+                          if (e > 1) {
+                              float k = (float) (1 / Math.sqrt(e));
+                              nx = CX + (nx - CX) * k;
+                              ny = CY + (ny - CY) * k;
+                          }
+                          // Don't walk through the igloo
+                          float ix = (nx - IGLOO_X) / 140f, iy = (ny - (IGLOO_Y - 30)) / 55f;
+                          float ie = ix * ix + iy * iy;
+                          if (ie < 1) {
+                              float k = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f)));
+                              nx = IGLOO_X + (nx - IGLOO_X) * k;
+                              ny = (IGLOO_Y - 30) + (ny - (IGLOO_Y - 30)) * k;
+                          }
+                          trailDist += Math.abs(nx - px) + Math.abs(ny - py);
+                          px = nx;
+                          py = ny;
+                          if (Math.abs(dx) > Math.abs(dy)) facing = dx < 0 ? LEFT : RIGHT;
+                          else facing = dy < 0 ? UP : DOWN;
+                          if (trailDist > 16) {
+                              trailDist = 0;
+                              trailHead = (trailHead + 1) % trailX.length;
+                              trailX[trailHead] = px + (trailHead % 2 == 0 ? -6 : 6);
+                              trailY[trailHead] = py;
+                              trailAge[trailHead] = 0.001f;
+                          }
+                      }
+                      if (okPressed) {
+                          okPressed = false;
+                          AppPeng a = nearest(list);
+                          if (a != null) { launching = a; launchT = 0; }
+                      }
+                  }
+                  walkPhase += dt * (moving ? 14f : 3f);
+                  for (int i = 0; i < trailAge.length; i++) if (trailAge[i] > 0) trailAge[i] += dt;
+
+                  // App penguins wander near their spot, and stop to look at you when you come close
+                  for (AppPeng a : list) {
+                      float pdx = px - a.x, pdy = py - a.y;
+                      if (pdx * pdx + pdy * pdy < 130 * 130) {
+                          a.moving = false;
+                          if (Math.abs(pdx) > Math.abs(pdy)) a.facing = pdx < 0 ? LEFT : RIGHT;
+                          else a.facing = pdy < 0 ? UP : DOWN;
+                      } else if (a.wait > 0) {
+                          a.wait -= dt;
+                          a.moving = false;
+                      } else {
+                          float dx = a.tx - a.x, dy = a.ty - a.y;
+                          float d = (float) Math.sqrt(dx * dx + dy * dy);
+                          if (d < 2) {
+                              a.wait = 1.5f + rnd.nextFloat() * 3.5f;
+                              a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 90;
+                              a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
+                              a.moving = false;
+                          } else {
+                              float step = Math.min(d, 32f * dt);
+                              a.x += dx / d * step;
+                              a.y += dy / d * step;
+                              a.moving = true;
+                              if (Math.abs(dx) > Math.abs(dy)) a.facing = dx < 0 ? LEFT : RIGHT;
+                              else a.facing = dy < 0 ? UP : DOWN;
+                          }
+                      }
+                      a.phase += dt * (a.moving ? 10f : 3f);
+                  }
+
+                  for (int i = 0; i < snowX.length; i++) {
+                      snowY[i] += snowSpd[i] * dt;
+                      snowX[i] += (float) Math.sin(time * 0.8f + i) * 12f * dt;
+                      if (snowY[i] > VH + 5) { snowY[i] = -5; snowX[i] = rnd.nextFloat() * VW; }
+                      if (snowX[i] < -5) snowX[i] = VW + 5;
+                      if (snowX[i] > VW + 5) snowX[i] = -5;
+                  }
+              }
+
+              // ------------------------------------------------------------------ drawing
+
+              void draw(Canvas c, List<AppPeng> list) {
+                  int camX = (int) Math.max(0, Math.min(WW - VW, px - VW / 2f));
+                  int camY = (int) Math.max(0, Math.min(WH - VH, py - VH / 2f - 40));
+
+                  src.set(camX, camY, camX + VW, camY + VH);
+                  dst.set(0, 0, VW, VH);
+                  c.drawBitmap(world, src, dst, null);
+
+                  c.save();
+                  c.translate(-camX, -camY);
+
+                  // Waves
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(2.2f);
+                  for (int i = 0; i < waveX.length; i++) {
+                      float x = waveX[i] + (float) Math.sin(time * 0.6f + wavePh[i]) * 8;
+                      float y = waveY[i];
+                      if (x < camX - 30 || x > camX + VW + 30 || y < camY - 20 || y > camY + VH + 20) continue;
+                      int alpha = (int) (70 + 70 * Math.sin(time * 1.4f + wavePh[i]));
+                      p.setColor((Math.max(0, alpha) << 24) | 0xffffff);
+                      rf.set(x - 10, y - 4, x + 10, y + 4);
+                      c.drawArc(rf, 200, 140, false, p);
+                  }
+                  p.setStyle(Paint.Style.FILL);
+
+                  // Footprints
+                  for (int i = 0; i < trailX.length; i++) {
+                      float age = trailAge[i];
+                      if (age <= 0 || age > 6) continue;
+                      int alpha = (int) (110 * (1 - age / 6f));
+                      p.setColor((alpha << 24) | 0xa9bfd0);
+                      c.drawOval(trailX[i] - 4, trailY[i] - 2, trailX[i] + 4, trailY[i] + 2, p);
+                  }
+
+                  // Everyone, sorted top to bottom so closer penguins draw in front
+                  AppPeng near = launching != null ? launching : nearest(list);
+                  drawList.clear();
+                  drawList.addAll(list);
+                  drawList.add(this);
+                  Collections.sort(drawList, (a, b) -> Float.compare(yOf(a), yOf(b)));
+                  for (Object o : drawList) {
+                      if (o == this) {
+                          float hop = launching != null ? (float) Math.abs(Math.sin(launchT * 18)) * 14 : 0;
+                          drawPenguin(c, px, py - hop, 1.12f, PLAYER_SCARF, facing, walkPhase, moving, true);
+                      } else {
+                          AppPeng a = (AppPeng) o;
+                          if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
+                          drawPenguin(c, a.x, a.y, 1f, a.scarf, a.facing, a.phase, a.moving, false);
+                      }
+                  }
+                  // Warm glow in the igloo doorway at night
+                  float night = nightAmount();
+                  if (night > 0.05f) {
+                      p.setShader(new RadialGradient(IGLOO_X, IGLOO_Y - 14, 60,
+                              (((int) (night * 150)) << 24) | 0xffb74d, 0x00ffb74d, Shader.TileMode.CLAMP));
+                      c.drawCircle(IGLOO_X, IGLOO_Y - 14, 60, p);
+                      p.setShader(null);
+                  }
+                  c.restore();
+
+                  // Night tint
+                  if (night > 0.01f) {
+                      c.drawColor((((int) (night * 115)) << 24) | 0x0a1440);
+                  }
+
+                  // App signs float above everyone, and stay bright at night
+                  c.save();
+                  c.translate(-camX, -camY);
+                  for (AppPeng a : list) {
+                      if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
+                      drawSign(c, a, a == near);
+                  }
+                  c.restore();
+
+                  // Falling snow
+                  p.setColor(0xd0ffffff);
+                  for (int i = 0; i < snowX.length; i++) c.drawCircle(snowX[i], snowY[i], snowR[i], p);
+
+                  drawHud(c, near);
+              }
+
+              float yOf(Object o) {
+                  return o == this ? py : ((AppPeng) o).y;
+              }
+
+              float nightAmount() {
+                  Calendar cal = Calendar.getInstance();
+                  float hr = cal.get(Calendar.HOUR_OF_DAY) + cal.get(Calendar.MINUTE) / 60f;
+                  if (hr >= 19) return Math.min(1f, (hr - 19) / 2f);
+                  if (hr < 6) return 1f;
+                  if (hr < 8) return 1f - (hr - 6) / 2f;
+                  return 0f;
+              }
+
+              void drawPenguin(Canvas c, float x, float y, float s, int scarf, int face,
+                               float phase, boolean walking, boolean player) {
+                  c.save();
+                  c.translate(x, y);
+                  c.scale(s, s);
+
+                  p.setColor(0x30000000);
+                  c.drawOval(-22, -6, 22, 6, p);
+
+                  float sway = walking ? (float) Math.sin(phase) * 7f : (float) Math.sin(phase * 0.5f) * 1.5f;
+                  c.rotate(sway);
+
+                  // Feet
+                  float lift = walking ? (float) Math.sin(phase) * 3f : 0;
+                  p.setColor(0xffef8a3c);
+                  c.drawOval(-15, -5 - Math.max(0, lift), -3, 2 - Math.max(0, lift), p);
+                  c.drawOval(3, -5 - Math.max(0, -lift), 15, 2 - Math.max(0, -lift), p);
+
+                  // Flippers
+                  float flap = walking ? (float) Math.sin(phase) * 14f : 0;
+                  p.setColor(0xff1b2230);
+                  c.save();
+                  c.rotate(18 + flap, -18, -40);
+                  c.drawOval(-25, -44, -14, -18, p);
+                  c.restore();
+                  c.save();
+                  c.rotate(-18 - flap, 18, -40);
+                  c.drawOval(14, -44, 25, -18, p);
+                  c.restore();
+
+                  // Body and head
+                  c.drawOval(-20, -62, 20, 0, p);
+                  c.drawCircle(0, -60, 15, p);
+
+                  // Belly
+                  if (face != UP) {
+                      p.setColor(0xfffafcff);
+                      if (face == DOWN) c.drawOval(-14, -50, 14, -3, p);
+                      else if (face == LEFT) c.drawOval(-17, -48, 5, -4, p);
+                      else c.drawOval(-5, -48, 17, -4, p);
+                  }
+
+                  // Face
+                  if (face != UP) {
+                      float ex1, ex2, bx;
+                      boolean twoEyes = face == DOWN;
+                      if (face == DOWN) { ex1 = -6; ex2 = 6; bx = 0; }
+                      else if (face == LEFT) { ex1 = -7; ex2 = -7; bx = -1; }
+                      else { ex1 = 7; ex2 = 7; bx = 1; }
+                      p.setColor(0xffffffff);
+                      c.drawCircle(ex1, -64, 4.2f, p);
+                      if (twoEyes) c.drawCircle(ex2, -64, 4.2f, p);
+                      p.setColor(0xff111111);
+                      float look = face == LEFT ? -1 : face == RIGHT ? 1 : 0;
+                      c.drawCircle(ex1 + look, -63.5f, 2.1f, p);
+                      if (twoEyes) c.drawCircle(ex2 + look, -63.5f, 2.1f, p);
+                      p.setColor(0xffffa726);
+                      path.reset();
+                      if (bx == 0) {
+                          path.moveTo(-4.5f, -59);
+                          path.lineTo(4.5f, -59);
+                          path.lineTo(0, -52);
+                      } else {
+                          path.moveTo(bx * 11, -61);
+                          path.lineTo(bx * 11, -55);
+                          path.lineTo(bx * 21, -58);
+                      }
+                      path.close();
+                      c.drawPath(path, p);
+                  }
+
+                  // Scarf
+                  p.setColor(scarf);
+                  rf.set(-17, -51, 17, -44);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  float tailX = face == LEFT ? 8 : face == RIGHT ? -14 : 5;
+                  float wave = walking ? (float) Math.sin(phase * 1.3f) * 2 : 0;
+                  rf.set(tailX, -47, tailX + 7, -32 + wave);
+                  c.drawRoundRect(rf, 3, 3, p);
+
+                  // Your penguin wears a beanie so you can always spot yourself
+                  if (player) {
+                      rf.set(-14, -80, 14, -60);
+                      c.drawArc(rf, 180, 180, true, p);
+                      p.setColor(0xffffffff);
+                      rf.set(-15, -72, 15, -67);
+                      c.drawRoundRect(rf, 2, 2, p);
+                      c.drawCircle(0, -80, 4.5f, p);
+                  }
+                  c.restore();
+              }
+
+              void drawSign(Canvas c, AppPeng a, boolean highlight) {
+                  float bob = (float) Math.sin(time * 2f + a.phase) * 3f;
+                  float s = highlight ? 1.25f : 1f;
+                  float cx = a.x, cy = a.y - 105 + bob - (highlight ? 8 : 0);
+                  float half = 30 * s;
+
+                  // Pointer
+                  p.setColor(0xffffffff);
+                  path.reset();
+                  path.moveTo(cx - 7, cy + half - 1);
+                  path.lineTo(cx + 7, cy + half - 1);
+                  path.lineTo(cx, cy + half + 9);
+                  path.close();
+                  c.drawPath(path, p);
+
+                  // Card
+                  p.setColor(0x40000000);
+                  rf.set(cx - half + 2, cy - half + 4, cx + half + 2, cy + half + 4);
+                  c.drawRoundRect(rf, 12, 12, p);
+                  p.setColor(0xffffffff);
+                  rf.set(cx - half, cy - half, cx + half, cy + half);
+                  c.drawRoundRect(rf, 12, 12, p);
+                  if (highlight) {
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(4);
+                      p.setColor(a.scarf);
+                      c.drawRoundRect(rf, 12, 12, p);
+                      p.setStyle(Paint.Style.FILL);
+                  }
+                  if (a.icon != null) {
+                      float ih = 23 * s;
+                      rf.set(cx - ih, cy - ih, cx + ih, cy + ih);
+                      c.drawBitmap(a.icon, null, rf, p);
+                  } else {
+                      tp.setColor(0xff37474f);
+                      tp.setTextSize(28 * s);
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      c.drawText(a.label.substring(0, 1).toUpperCase(Locale.getDefault()), cx, cy + 10 * s, tp);
+                  }
+
+                  // Name tag under the card when you're close
+                  if (highlight) {
+                      String name = a.label.length() > 20 ? a.label.substring(0, 19) + "…" : a.label;
+                      tp.setTextSize(22);
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      float tw = tp.measureText(name);
+                      rf.set(cx - tw / 2 - 12, cy - half - 40, cx + tw / 2 + 12, cy - half - 8);
+                      p.setColor(0xe0263238);
+                      c.drawRoundRect(rf, 14, 14, p);
+                      tp.setColor(0xffffffff);
+                      c.drawText(name, cx, cy - half - 17, tp);
+                  }
+              }
+
+              void drawHud(Canvas c, AppPeng near) {
+                  long now = System.currentTimeMillis();
+                  String t = timeFmt.format(now);
+                  String d = dateFmt.format(now);
+                  tp.setTextAlign(Paint.Align.RIGHT);
+                  tp.setShadowLayer(4, 0, 2, 0x99000000);
+                  tp.setColor(0xffffffff);
+                  tp.setTextSize(40);
+                  c.drawText(t, VW - 40, 62, tp);
+                  tp.setTextSize(20);
+                  c.drawText(d, VW - 40, 90, tp);
+                  tp.setShadowLayer(0, 0, 0, 0);
+
+                  String msg = null;
+                  if (near != null && launching == null) msg = "Press OK to open " + near.label;
+                  else if (time < 9 && near == null) msg = "Use the arrows to waddle around. Walk up to a penguin and press OK.";
+                  if (msg != null) {
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      tp.setTextSize(22);
+                      float tw = tp.measureText(msg);
+                      rf.set(VW / 2f - tw / 2 - 22, VH - 74, VW / 2f + tw / 2 + 22, VH - 30);
+                      p.setColor(0xc0172a3a);
+                      c.drawRoundRect(rf, 22, 22, p);
+                      tp.setColor(0xffffffff);
+                      c.drawText(msg, VW / 2f, VH - 44, tp);
+                  }
+              }
+          }
+          SNOW_EOF
+
+      - name: Make a signing key (first build only)
+        run: |
+          if [ ! -f signing/snowisland.keystore ]; then
+            mkdir -p signing
+            keytool -genkeypair -keystore signing/snowisland.keystore -storepass snowisland \
+              -alias snowisland -keypass snowisland -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Snow Island"
+            echo NEW_KEY=1 >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the app
+        working-directory: app
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Save the signing key so updates install over the old version
+        if: env.NEW_KEY == '1'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add signing/snowisland.keystore
+          git commit -m "Save signing key [skip ci]"
+          git push
+
+      - name: Publish SnowIsland.apk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/*.apk SnowIsland.apk
+          gh release delete latest --yes --cleanup-tag || true
+          sleep 3
+          gh release create latest SnowIsland.apk --latest \
+            --title "Snow Island (build ${{ github.run_number }})" \
+            --notes "Install on the TV with the Downloader app."
