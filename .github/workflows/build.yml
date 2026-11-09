@@ -105,6 +105,9 @@ jobs:
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LAUNCHER" />
                   </intent>
+                  <package android:name="com.teamsmart.videomanager.tv" />
+                  <package android:name="com.liskovsoft.smarttubetv.beta" />
+                  <package android:name="com.liskovsoft.smarttubetv" />
               </queries>
 
               <application
@@ -168,6 +171,7 @@ jobs:
           package com.josh.snowisland;
 
           import android.app.Activity;
+          import android.app.AlertDialog;
           import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
@@ -185,12 +189,15 @@ jobs:
           import android.graphics.Typeface;
           import android.graphics.drawable.Drawable;
           import android.media.AudioAttributes;
+          import android.media.AudioManager;
           import android.media.MediaPlayer;
           import android.media.SoundPool;
           import android.media.tv.TvContract;
           import android.media.tv.TvInputInfo;
           import android.media.tv.TvInputManager;
+          import android.net.Uri;
           import android.os.Bundle;
+          import android.os.SystemClock;
           import android.provider.Settings;
           import android.view.InputDevice;
           import android.view.KeyEvent;
@@ -199,9 +206,17 @@ jobs:
           import android.view.SurfaceView;
           import android.view.View;
           import android.view.WindowManager;
+          import android.widget.EditText;
           import android.widget.Toast;
 
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.ByteArrayOutputStream;
           import java.io.File;
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
           import java.text.SimpleDateFormat;
           import java.util.ArrayList;
           import java.util.Calendar;
@@ -216,6 +231,8 @@ jobs:
           import java.util.Random;
           import java.util.Set;
           import java.util.concurrent.ConcurrentLinkedQueue;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
 
           /**
            * Snow Island: a home screen you walk around.
@@ -239,7 +256,20 @@ jobs:
                       E_HOP = 6, E_FLAP = 7, E_LOOK = 8, E_SIT = 9, E_FLINCH = 10;
 
               static final int SCENE_ISLAND = 0, SCENE_IGLOO = 1, SCENE_FIRE = 2;
-              static final int OV_NONE = 0, OV_WHEEL = 1, OV_LIST = 2;
+              static final int OV_NONE = 0, OV_WHEEL = 1, OV_LIST = 2, OV_FOLDER = 3, OV_PLAYER = 4;
+
+              // The CD player sits on a little ice table in front of the igloo
+              static final float CD_X = IGLOO_X, CD_Y = IGLOO_Y + 190;
+
+              // YouTube playlists that come with the island. To add one: {"Name", "playlist id", "colour"}
+              static final String[][] YT_DISCS = {
+                      {"Christmas", "PLXgUstcYt9KuLMQ1gt9jKmQB5ZSMqs9HF", "#c62828"},
+              };
+              // SmartTube's app names (stable first, then beta builds)
+              static final String[] SMARTTUBE_PKGS = {"com.teamsmart.videomanager.tv", "com.liskovsoft.smarttubetv.beta", "com.liskovsoft.smarttubetv"};
+              static final int[] MIX_COLS = {0xff1e88e5, 0xff8e24aa, 0xff43a047, 0xfffb8c00, 0xff00acc1, 0xffd81b60, 0xff5e35b1, 0xfffdd835};
+              static final String[] PLAYER_BTNS = {"⏮", "⏯", "⏭", "💿", "🔍", "⏹"};
+              static final String[] PLAYER_BTN_NAMES = {"Previous song", "Play / pause", "Next song", "CD folder", "Song list", "Stop"};
 
               static final int SEASON_NONE = 0, SEASON_XMAS = 1, SEASON_HALLOWEEN = 2, SEASON_VALENTINE = 3, SEASON_NEWYEAR = 4;
               static final String[] SEASON_PREF_NAMES = {"Auto", "Christmas", "Halloween", "Valentine's", "New Year", "Off"};
@@ -300,6 +330,16 @@ jobs:
                   boolean world;
               }
 
+              /** One CD in the folder: either a YouTube playlist or a mix of songs copied onto the TV. */
+              static class Disc {
+                  String name, list;
+                  boolean yt;
+                  int color;
+                  final ArrayList<String> songs = new ArrayList<>();
+                  volatile ArrayList<String[]> tracks;   // YouTube: {videoId, title}
+                  volatile boolean loading;
+              }
+
               static class Item {
                   String label, value;
                   Bitmap icon;
@@ -325,7 +365,28 @@ jobs:
               SharedPreferences prefs;
               boolean musicOn, soundOn, weatherFx;
               int seasonPref;
+              boolean namesAlways;
               final Set<String> hidden = new HashSet<>();
+
+              // CD player + folder
+              final ArrayList<Disc> discs = new ArrayList<>();
+              final Object cdSpot = new Object();
+              final ConcurrentLinkedQueue<Runnable> gameTasks = new ConcurrentLinkedQueue<>();
+              final ArrayList<String> newSongs = new ArrayList<>();
+              final Set<String> skippedSongs = new HashSet<>();
+              int folderSel, playerSel;
+              float folderAnim;
+              boolean folderClosing;
+              Runnable afterFolderClose;
+              volatile Disc nowDisc;
+              volatile boolean nowYT, radioPaused, ytActive, cdPlaying, dialogOpen;
+              volatile String nowTitle = "";
+              volatile long ytQuietSince, ytGraceUntil;
+              MediaPlayer cdPlayer;
+              final ArrayList<String> cdQueue = new ArrayList<>();
+              int cdIndex;
+              boolean cdResumeOnReturn;
+              float nextCdNote;
 
               // Scene + overlays
               int scene = SCENE_ISLAND, pendingScene = -1;
@@ -413,7 +474,9 @@ jobs:
                   weatherFx = prefs.getBoolean("weatherfx", true);
                   seasonPref = prefs.getInt("season", 0);
                   bellyIcons = prefs.getBoolean("belly", false);
+                  namesAlways = prefs.getBoolean("namesalways", true);
                   hidden.addAll(prefs.getStringSet("hidden", new HashSet<String>()));
+                  loadDiscs();
 
                   view = new SurfaceView(this);
                   holder = view.getHolder();
@@ -429,6 +492,7 @@ jobs:
                   initParticles();
                   initAudio();
                   startWeather();
+                  startRadioWatch();
               }
 
               @Override
@@ -439,6 +503,11 @@ jobs:
                   kUp = kDown = kLeft = kRight = false;
                   axX = axY = 0;
                   loadApps();
+                  if (ytActive) { ytQuietSince = 0; ytGraceUntil = System.currentTimeMillis() + 6000; }
+                  if (cdResumeOnReturn) {
+                      cdResumeOnReturn = false;
+                      try { if (cdPlayer != null) { cdPlayer.start(); cdPlaying = true; } } catch (Exception ignored) { }
+                  }
                   updateMusic();
                   if (scene == SCENE_FIRE) startCrackle();
               }
@@ -447,6 +516,10 @@ jobs:
               protected void onPause() {
                   super.onPause();
                   resumed = false;
+                  // The CD player pauses while you're in another app and picks back up when you return
+                  try {
+                      if (cdPlayer != null && cdPlayer.isPlaying()) { cdPlayer.pause(); cdResumeOnReturn = true; }
+                  } catch (Exception ignored) { }
                   stopCrackle();
                   if (music != null) {
                       try { if (music.isPlaying()) music.pause(); } catch (Exception ignored) { }
@@ -458,6 +531,7 @@ jobs:
                   super.onDestroy();
                   destroyed = true;
                   try { if (music != null) music.release(); } catch (Exception ignored) { }
+                  try { if (cdPlayer != null) cdPlayer.release(); } catch (Exception ignored) { }
                   try { if (sounds != null) sounds.release(); } catch (Exception ignored) { }
               }
 
@@ -556,7 +630,7 @@ jobs:
                       String[] names = {"step", "chirp", "open", "whoosh", "splat", "tick", "toggle", "door", "crackle"};
                       for (int i = 0; i < names.length; i++) {
                           try {
-                              File f = new File(dir, (i == 8 ? "sfx3_" : "sfx2_") + names[i] + ".wav");
+                              File f = new File(dir, (i == 1 || i == 8 ? "sfx4_" : "sfx2_") + names[i] + ".wav");
                               if (!f.exists()) {
                                   float[] data;
                                   switch (i) {
@@ -576,9 +650,10 @@ jobs:
                           } catch (Exception ignored) { }
                       }
                       try {
-                          File mf = new File(dir, "music2.wav");
+                          File mf = new File(dir, "music3.wav");
                           if (!mf.exists()) {
-                              File tmp = new File(dir, "music2.tmp");
+                              new File(dir, "music2.wav").delete();
+                              File tmp = new File(dir, "music3.tmp");
                               Synth.writeWav(tmp, Synth.music());
                               tmp.renameTo(mf);
                           }
@@ -620,11 +695,16 @@ jobs:
                   runOnUiThread(() -> { try { if (music != null) music.setVolume(0.32f, 0.32f); } catch (Exception ignored) { } });
               }
 
+              /** True while a CD is playing, so the island's own music stays quiet. */
+              boolean radioBusy() {
+                  return cdPlaying || (ytActive && !radioPaused);
+              }
+
               void updateMusic() {
                   runOnUiThread(() -> {
                       if (music == null) return;
                       try {
-                          if (musicOn && resumed) { if (!music.isPlaying()) music.start(); }
+                          if (musicOn && resumed && !radioBusy()) { if (!music.isPlaying()) music.start(); }
                           else if (music.isPlaying()) music.pause();
                       } catch (Exception ignored) { }
                   });
@@ -646,6 +726,445 @@ jobs:
                   }, "island-weather");
                   t.setDaemon(true);
                   t.start();
+              }
+
+              // ================================================================== CD player: discs
+
+              void loadDiscs() {
+                  discs.clear();
+                  try {
+                      JSONArray arr = new JSONArray(prefs.getString("discs", "[]"));
+                      for (int i = 0; i < arr.length(); i++) {
+                          JSONObject o = arr.getJSONObject(i);
+                          Disc d = new Disc();
+                          d.name = o.optString("n", "Disc");
+                          d.yt = o.optBoolean("y", false);
+                          d.list = o.optString("l", "");
+                          d.color = o.optInt("c", MIX_COLS[i % MIX_COLS.length]);
+                          JSONArray s = o.optJSONArray("s");
+                          if (s != null) for (int k = 0; k < s.length(); k++) d.songs.add(s.getString(k));
+                          discs.add(d);
+                      }
+                  } catch (Exception ignored) { }
+                  // Make sure every built-in playlist has a disc (new ones show up after an update)
+                  int insertAt = 0;
+                  for (String[] def : YT_DISCS) {
+                      boolean have = false;
+                      for (Disc d : discs) if (d.yt && def[1].equals(d.list)) { have = true; break; }
+                      if (have) continue;
+                      Disc d = new Disc();
+                      d.name = def[0];
+                      d.yt = true;
+                      d.list = def[1];
+                      try { d.color = Color.parseColor(def[2]); } catch (Exception ex) { d.color = 0xffc62828; }
+                      discs.add(Math.min(insertAt++, discs.size()), d);
+                  }
+                  saveDiscs();
+              }
+
+              void saveDiscs() {
+                  try {
+                      JSONArray arr = new JSONArray();
+                      for (Disc d : discs) {
+                          JSONObject o = new JSONObject();
+                          o.put("n", d.name);
+                          o.put("y", d.yt);
+                          o.put("l", d.list == null ? "" : d.list);
+                          o.put("c", d.color);
+                          JSONArray s = new JSONArray();
+                          for (String song : d.songs) s.put(song);
+                          o.put("s", s);
+                          arr.put(o);
+                      }
+                      prefs.edit().putString("discs", arr.toString()).apply();
+                  } catch (Exception ignored) { }
+              }
+
+              /** Copy songs here with ADB: /sdcard/Android/data/com.josh.snowisland/files/Music */
+              File musicDir() {
+                  File d = getExternalFilesDir("Music");
+                  if (d != null && !d.exists()) d.mkdirs();
+                  return d;
+              }
+
+              static boolean isSong(String n) {
+                  String l = n.toLowerCase(Locale.US);
+                  return l.endsWith(".mp3") || l.endsWith(".m4a") || l.endsWith(".aac") || l.endsWith(".ogg")
+                          || l.endsWith(".wav") || l.endsWith(".flac") || l.endsWith(".opus");
+              }
+
+              static String prettySong(String file) {
+                  int dot = file.lastIndexOf('.');
+                  String s = dot > 0 ? file.substring(0, dot) : file;
+                  return s.replace('_', ' ').trim();
+              }
+
+              /** Looks for songs that aren't on a disc yet. Runs on a background thread. */
+              void scanSongs() {
+                  File dir = musicDir();
+                  if (dir == null) return;
+                  String[] files = dir.list();
+                  if (files == null) return;
+                  Set<String> ignored = new HashSet<>(prefs.getStringSet("ignoredsongs", new HashSet<String>()));
+                  ArrayList<String> found = new ArrayList<>();
+                  for (String f : files) if (isSong(f)) found.add(f);
+                  Collections.sort(found, String::compareToIgnoreCase);
+                  gameTasks.add(() -> {
+                      Set<String> onDisc = new HashSet<>();
+                      for (Disc d : discs) onDisc.addAll(d.songs);
+                      for (String f : found) {
+                          if (onDisc.contains(f) || ignored.contains(f) || skippedSongs.contains(f) || newSongs.contains(f)) continue;
+                          newSongs.add(f);
+                      }
+                  });
+              }
+
+              // ================================================================== CD player: playback
+
+              void playDisc(Disc d, int start) {
+                  if (d.yt) {
+                      if (start >= 0 && d.tracks != null && start < d.tracks.size()) {
+                          String[] t = d.tracks.get(start);
+                          playYouTube(d, t[0], t[1]);
+                      } else {
+                          playYouTube(d, null, null);
+                      }
+                  } else {
+                      playLocal(d, start);
+                  }
+              }
+
+              void playLocal(Disc d, int start) {
+                  File dir = musicDir();
+                  ArrayList<String> q = new ArrayList<>();
+                  for (String s : d.songs) if (dir != null && new File(dir, s).exists()) q.add(s);
+                  if (q.isEmpty()) { toast(d.name + " has no songs on it yet"); return; }
+                  if (start >= 0 && start < d.songs.size()) {
+                      // Start from the chosen song, then carry on in order
+                      String first = d.songs.get(start);
+                      int at = q.indexOf(first);
+                      if (at > 0) { ArrayList<String> r = new ArrayList<>(q.subList(at, q.size())); r.addAll(q.subList(0, at)); q = r; }
+                  } else {
+                      Collections.shuffle(q, rnd);
+                  }
+                  stopRadio();
+                  final ArrayList<String> queue = q;
+                  nowDisc = d;
+                  nowYT = false;
+                  radioPaused = false;
+                  runOnUiThread(() -> {
+                      cdQueue.clear();
+                      cdQueue.addAll(queue);
+                      cdIndex = 0;
+                      startCdTrack();
+                  });
+              }
+
+              /** UI thread only. */
+              void startCdTrack() {
+                  try { if (cdPlayer != null) cdPlayer.release(); } catch (Exception ignored) { }
+                  cdPlayer = null;
+                  cdPlaying = false;
+                  if (cdQueue.isEmpty() || destroyed) { updateMusic(); return; }
+                  cdIndex = (cdIndex % cdQueue.size() + cdQueue.size()) % cdQueue.size();
+                  String song = cdQueue.get(cdIndex);
+                  try {
+                      MediaPlayer mp = new MediaPlayer();
+                      mp.setAudioAttributes(new AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_MEDIA)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
+                      mp.setDataSource(new File(musicDir(), song).getAbsolutePath());
+                      mp.setOnCompletionListener(m -> { cdIndex++; startCdTrack(); });
+                      mp.prepare();
+                      cdPlayer = mp;
+                      nowTitle = prettySong(song);
+                      if (resumed) { mp.start(); cdPlaying = true; }
+                      else { cdPlaying = true; cdResumeOnReturn = true; }
+                      radioPaused = false;
+                  } catch (Exception ex) {
+                      toast("Couldn't play " + prettySong(song));
+                  }
+                  updateMusic();
+              }
+
+              void radioToggle() {
+                  Disc d = nowDisc;
+                  if (d == null) return;
+                  if (nowYT) {
+                      mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+                      radioPaused = !radioPaused;
+                      ytActive = true;
+                      ytQuietSince = 0;
+                      ytGraceUntil = System.currentTimeMillis() + 8000;
+                      updateMusic();
+                  } else {
+                      runOnUiThread(() -> {
+                          try {
+                              if (cdPlayer == null) { startCdTrack(); return; }
+                              if (cdPlayer.isPlaying()) { cdPlayer.pause(); cdPlaying = false; radioPaused = true; }
+                              else { cdPlayer.start(); cdPlaying = true; radioPaused = false; }
+                          } catch (Exception ignored) { }
+                          updateMusic();
+                      });
+                  }
+                  play(S_TOGGLE, 0.4f, radioPaused ? 0.8f : 1.1f);
+              }
+
+              void radioSkip(int dir) {
+                  if (nowDisc == null) return;
+                  if (nowYT) {
+                      mediaKey(dir > 0 ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+                      nowTitle = nowDisc.name;
+                      radioPaused = false;
+                      ytActive = true;
+                      ytQuietSince = 0;
+                      ytGraceUntil = System.currentTimeMillis() + 8000;
+                      updateMusic();
+                  } else {
+                      runOnUiThread(() -> {
+                          // "Previous" restarts the song if it's more than a few seconds in
+                          try {
+                              if (dir < 0 && cdPlayer != null && cdPlayer.getCurrentPosition() > 4000) {
+                                  cdPlayer.seekTo(0);
+                                  if (!cdPlayer.isPlaying()) { cdPlayer.start(); cdPlaying = true; radioPaused = false; updateMusic(); }
+                                  return;
+                              }
+                          } catch (Exception ignored) { }
+                          cdIndex += dir;
+                          startCdTrack();
+                      });
+                  }
+                  play(S_TICK, 0.45f, dir > 0 ? 1.2f : 0.9f);
+              }
+
+              void stopRadio() {
+                  if (nowYT && ytActive && !radioPaused) mediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE);
+                  nowDisc = null;
+                  nowYT = false;
+                  ytActive = false;
+                  radioPaused = false;
+                  nowTitle = "";
+                  cdResumeOnReturn = false;
+                  runOnUiThread(() -> {
+                      try { if (cdPlayer != null) cdPlayer.release(); } catch (Exception ignored) { }
+                      cdPlayer = null;
+                      cdPlaying = false;
+                      cdQueue.clear();
+                      updateMusic();
+                  });
+              }
+
+              void playYouTube(Disc d, String videoId, String title) {
+                  if (!smartTubeInstalled()) {
+                      toast("Install SmartTube to play YouTube discs");
+                      return;
+                  }
+                  stopRadio();
+                  nowDisc = d;
+                  nowYT = true;
+                  radioPaused = false;
+                  ytActive = true;
+                  ytQuietSince = 0;
+                  ytGraceUntil = System.currentTimeMillis() + 30000;
+                  nowTitle = title != null ? title : d.name;
+                  updateMusic();
+                  new Thread(() -> {
+                      String vid = videoId, t = title;
+                      if (vid == null) {
+                          // Start from a random song in the playlist
+                          ArrayList<String[]> tr = fetchTracks(d);
+                          if (tr != null && !tr.isEmpty()) {
+                              String[] pick = tr.get(rnd.nextInt(tr.size()));
+                              vid = pick[0];
+                              t = pick[1];
+                          }
+                      }
+                      nowTitle = t != null ? t : d.name;
+                      String url = vid != null
+                              ? "https://www.youtube.com/watch?v=" + vid + "&list=" + d.list
+                              : "https://www.youtube.com/playlist?list=" + d.list;
+                      openInSmartTube(url);
+                  }, "island-disc").start();
+              }
+
+              /** Finds SmartTube on the TV: by its known app names, or by looking for an app called "SmartTube". */
+              String smartTubePkg() {
+                  PackageManager pm = getPackageManager();
+                  for (String pk : SMARTTUBE_PKGS) {
+                      try { pm.getPackageInfo(pk, 0); return pk; } catch (Exception ignored) { }
+                  }
+                  List<AppPeng> all;
+                  synchronized (lock) { all = allApps; }
+                  for (AppPeng a : all) {
+                      if (a.label != null && a.label.toLowerCase(Locale.US).replace(" ", "").contains("smarttube")) return a.pkg;
+                  }
+                  return null;
+              }
+
+              boolean smartTubeInstalled() {
+                  return smartTubePkg() != null;
+              }
+
+              void openInSmartTube(String url) {
+                  String pk = smartTubePkg();
+                  runOnUiThread(() -> {
+                      try {
+                          Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                          if (pk != null) i.setPackage(pk);
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          startActivity(i);
+                      } catch (Exception ex) {
+                          toast("Couldn't open SmartTube");
+                          stopRadio();
+                      }
+                  });
+              }
+
+              /** Reads the song list of a YouTube playlist (first 100 songs). Background thread only. */
+              ArrayList<String[]> fetchTracks(Disc d) {
+                  if (d.tracks != null) return d.tracks;
+                  ArrayList<String[]> out = new ArrayList<>();
+                  try {
+                      HttpURLConnection con = (HttpURLConnection) new URL("https://www.youtube.com/playlist?list=" + d.list).openConnection();
+                      con.setConnectTimeout(10000);
+                      con.setReadTimeout(15000);
+                      con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
+                      con.setRequestProperty("Accept-Language", "en-CA,en;q=0.9");
+                      con.setRequestProperty("Cookie", "CONSENT=YES+1; SOCS=CAI");
+                      String html;
+                      try (InputStream in = con.getInputStream()) {
+                          ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                          byte[] buf = new byte[8192];
+                          int n;
+                          while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                          html = bo.toString("UTF-8");
+                      } finally {
+                          con.disconnect();
+                      }
+                      parseTracks(html, out);
+                  } catch (Exception ignored) { }
+                  if (!out.isEmpty()) {
+                      d.tracks = out;
+                      try {
+                          JSONArray a = new JSONArray();
+                          for (String[] t : out) { JSONArray p = new JSONArray(); p.put(t[0]); p.put(t[1]); a.put(p); }
+                          prefs.edit().putString("tracks_" + d.list, a.toString()).apply();
+                      } catch (Exception ignored) { }
+                      return out;
+                  }
+                  // Offline? Use the list saved last time.
+                  try {
+                      JSONArray a = new JSONArray(prefs.getString("tracks_" + d.list, "[]"));
+                      for (int i = 0; i < a.length(); i++) out.add(new String[]{a.getJSONArray(i).getString(0), a.getJSONArray(i).getString(1)});
+                  } catch (Exception ignored) { }
+                  if (!out.isEmpty()) d.tracks = out;
+                  return out;
+              }
+
+              static void parseTracks(String html, ArrayList<String[]> out) {
+                  Set<String> seen = new HashSet<>();
+                  // Older page layout
+                  Matcher m = Pattern.compile("\"playlistVideoRenderer\":\\{\"videoId\":\"([A-Za-z0-9_-]{11})\"").matcher(html);
+                  while (m.find()) {
+                      String id = m.group(1);
+                      if (!seen.add(id)) continue;
+                      String t = jsonStringAfter(html, m.end(), "\"title\":{\"runs\":[{\"text\":\"", 3000);
+                      out.add(new String[]{id, t != null ? t : "Song " + (out.size() + 1)});
+                  }
+                  if (!out.isEmpty()) return;
+                  // Newer page layout
+                  m = Pattern.compile("\"contentId\":\"([A-Za-z0-9_-]{11})\"").matcher(html);
+                  while (m.find()) {
+                      String id = m.group(1);
+                      if (!seen.add(id)) continue;
+                      String t = jsonStringAfter(html, m.end(), "\"title\":{\"content\":\"", 4000);
+                      out.add(new String[]{id, t != null ? t : "Song " + (out.size() + 1)});
+                  }
+              }
+
+              /** Finds key within the next `within` characters and returns the JSON string that follows it. */
+              static String jsonStringAfter(String s, int from, String key, int within) {
+                  int k = s.indexOf(key, from);
+                  if (k < 0 || k - from > within) return null;
+                  int start = k + key.length();
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = start; i < s.length() && i < start + 400; i++) {
+                      char ch = s.charAt(i);
+                      if (ch == '\\' && i + 1 < s.length()) { sb.append(ch).append(s.charAt(++i)); continue; }
+                      if (ch == '"') {
+                          try { return new JSONArray("[\"" + sb + "\"]").getString(0); } catch (Exception ex) { return sb.toString(); }
+                      }
+                      sb.append(ch);
+                  }
+                  return null;
+              }
+
+              void mediaKey(int code) {
+                  try {
+                      AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                      long t = SystemClock.uptimeMillis();
+                      am.dispatchMediaKeyEvent(new KeyEvent(t, t, KeyEvent.ACTION_DOWN, code, 0));
+                      am.dispatchMediaKeyEvent(new KeyEvent(t, t, KeyEvent.ACTION_UP, code, 0));
+                  } catch (Exception ignored) { }
+              }
+
+              /**
+               * Watches for SmartTube going quiet (song list finished, or you closed it) so the
+               * island's own music can come back.
+               */
+              void startRadioWatch() {
+                  Thread t = new Thread(() -> {
+                      while (!destroyed) {
+                          try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
+                          if (!ytActive || radioPaused || !resumed) continue;
+                          long now = System.currentTimeMillis();
+                          if (now < ytGraceUntil) continue;
+                          boolean playing = false;
+                          try {
+                              AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                              playing = am.isMusicActive();
+                          } catch (Exception ignored) { }
+                          if (playing) { ytQuietSince = 0; continue; }
+                          if (ytQuietSince == 0) ytQuietSince = now;
+                          else if (now - ytQuietSince > 10000) {
+                              radioPaused = true;
+                              updateMusic();
+                          }
+                      }
+                  }, "island-radio");
+                  t.setDaemon(true);
+                  t.start();
+              }
+
+              void toast(String msg) {
+                  runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
+              }
+
+              /** Pops up the TV keyboard to type a name. The callback runs on the game thread. */
+              void askName(String title, String start, java.util.function.Consumer<String> done) {
+                  dialogOpen = true;
+                  runOnUiThread(() -> {
+                      try {
+                          EditText et = new EditText(this);
+                          et.setSingleLine(true);
+                          et.setText(start);
+                          et.setSelection(start.length());
+                          new AlertDialog.Builder(this)
+                                  .setTitle(title)
+                                  .setView(et)
+                                  .setPositiveButton("Save", (dlg, w) -> {
+                                      String v = et.getText().toString().trim();
+                                      gameTasks.add(() -> done.accept(v.isEmpty() ? start : v));
+                                  })
+                                  .setNegativeButton("Cancel", (dlg, w) -> gameTasks.add(() -> done.accept(null)))
+                                  .setOnCancelListener(dlg -> gameTasks.add(() -> done.accept(null)))
+                                  .setOnDismissListener(dlg -> dialogOpen = false)
+                                  .show();
+                      } catch (Exception ex) {
+                          dialogOpen = false;
+                          gameTasks.add(() -> done.accept(start));
+                      }
+                  });
               }
 
               // ================================================================== apps
@@ -690,6 +1209,7 @@ jobs:
                           allChairs = ch;
                           relayout();
                       }
+                      scanSongs();
                   }, "island-apps").start();
               }
 
@@ -1160,8 +1680,41 @@ jobs:
                       }
                   }
 
+                  Runnable task;
+                  while ((task = gameTasks.poll()) != null) {
+                      try { task.run(); } catch (Exception ignored) { }
+                  }
+
                   Integer k;
                   while ((k = keyQueue.poll()) != null) handleKey(k & ~REPEAT_FLAG, (k & REPEAT_FLAG) != 0, list);
+
+                  // CD folder slides up from the bottom of the screen, and back down when closed
+                  if (overlay == OV_FOLDER) {
+                      if (folderClosing) {
+                          folderAnim = Math.max(0, folderAnim - dt * 4.5f);
+                          if (folderAnim <= 0) {
+                              overlay = OV_NONE;
+                              folderClosing = false;
+                              Runnable after = afterFolderClose;
+                              afterFolderClose = null;
+                              if (after != null) after.run();
+                          }
+                      } else {
+                          folderAnim = Math.min(1, folderAnim + dt * 4f);
+                      }
+                  }
+
+                  // Newly copied songs ask which disc they belong on
+                  if (!newSongs.isEmpty() && overlay == OV_NONE && !dialogOpen && pendingScene < 0
+                          && launching == null && sittingChair == null && scene != SCENE_FIRE) {
+                      showSongPrompt();
+                  }
+
+                  // Little notes float up from the CD player while it plays
+                  if (scene == SCENE_ISLAND && nowDisc != null && radioBusy()) {
+                      nextCdNote -= dt;
+                      if (nextCdNote <= 0) { nextCdNote = 0.7f + rnd.nextFloat() * 0.6f; spawnNote(CD_X + 8, CD_Y - 62); }
+                  }
 
                   boolean inputHeld = kUp || kDown || kLeft || kRight || axX != 0 || axY != 0;
                   boolean frozen = overlay != OV_NONE || pendingScene >= 0 || launching != null || sittingChair != null || scene == SCENE_FIRE;
@@ -1258,7 +1811,7 @@ jobs:
                       if (obj != null) nk = obj;
                   }
                   if (!nk.equals(lastNearKey)) {
-                      if (near != null) play(S_CHIRP, 0.4f, 0.85f + (near.pkg.hashCode() & 7) * 0.05f);
+                      if (near != null) play(S_CHIRP, 0.16f, 0.9f + (near.pkg.hashCode() & 7) * 0.03f);
                       lastNearKey = nk;
                   }
 
@@ -1282,6 +1835,14 @@ jobs:
                           float kk = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f)));
                           nx = IGLOO_X + (nx - IGLOO_X) * kk;
                           ny = (IGLOO_Y - 35) + (ny - (IGLOO_Y - 35)) * kk;
+                      }
+                      // CD player table
+                      float cx2 = (nx - CD_X) / 58f, cy2 = (ny - (CD_Y - 6)) / 22f;
+                      float ce = cx2 * cx2 + cy2 * cy2;
+                      if (ce < 1) {
+                          float kk = (float) (1 / Math.sqrt(Math.max(ce, 0.0001f)));
+                          nx = CD_X + (nx - CD_X) * kk;
+                          ny = (CD_Y - 6) + (ny - (CD_Y - 6)) * kk;
                       }
                   } else {
                       nx = Math.max(170, Math.min(1110, nx));
@@ -1314,7 +1875,7 @@ jobs:
                           if (scene == SCENE_ISLAND) for (AppPeng a : apps) {
                               if (dist2(a.x, a.y, px, py) < 320 * 320) npcEmote(a, E_WAVE, 1.4f, 0.3f + rnd.nextFloat() * 0.4f);
                           }
-                          play(S_CHIRP, 0.45f, 1.1f);
+                          play(S_CHIRP, 0.22f, 1f);
                           break;
                       case E_DANCE:
                           if (scene == SCENE_ISLAND) for (AppPeng a : apps) {
@@ -1394,7 +1955,7 @@ jobs:
                                   a.facing = faceToward(a.x, a.y, px, py);
                                   npcEmote(a, E_FLINCH, 0.5f, 0);
                                   play(S_SPLAT, 0.6f, 1f);
-                                  play(S_CHIRP, 0.45f, 1.35f);
+                                  play(S_CHIRP, 0.18f, 1.15f);
                                   if (rnd.nextFloat() < 0.6f) a.throwBackT = 0.9f + rnd.nextFloat() * 0.5f;
                                   splat(b.x, b.y - z * 0.3f - 40);
                                   done = true;
@@ -1479,7 +2040,7 @@ jobs:
                               float roll = rnd.nextFloat();
                               if (roll < 0.22f) npcEmote(o, E_FLAP, 0.6f, 0);
                               else if (roll < 0.4f) npcEmote(a, E_HOP, 0.5f, 0);
-                              if (dist2(a.x, a.y, px, py) < 700 * 700) play(S_CHIRP, 0.12f, 1.2f + rnd.nextFloat() * 0.4f);
+                              if (rnd.nextFloat() < 0.3f && dist2(a.x, a.y, px, py) < 450 * 450) play(S_CHIRP, 0.05f, 0.95f + rnd.nextFloat() * 0.2f);
                           }
                       }
                       if (a.chatT > a.chatDur) endChat(a);
@@ -1653,6 +2214,7 @@ jobs:
               /** Non-penguin things you can use: the igloo door outside, furniture inside. */
               String nearObject() {
                   if (scene == SCENE_ISLAND) {
+                      if (dist2(px, py, CD_X, CD_Y) < 85 * 85) return "cd";
                       return dist2(px, py, DOOR_X, DOOR_Y + 20) < 70 * 70 ? "door" : null;
                   }
                   if (py > 615 && Math.abs(px - 640) < 110) return "exit";
@@ -1669,6 +2231,7 @@ jobs:
                       case "tv": return "Press OK for TV Settings";
                       case "shelf": return "Press OK for Island settings";
                       case "fire": return "Press OK to sit by the fire";
+                      case "cd": return nowDisc != null ? "Press OK for the CD player" : "Press OK to open your CD folder";
                       default: return "";
                   }
               }
@@ -1697,6 +2260,52 @@ jobs:
                       } else if (ok) {
                           overlay = OV_NONE;
                           wheelAction(wheelSel);
+                      }
+                      return;
+                  }
+                  if (overlay == OV_FOLDER) {
+                      if (folderClosing) return;
+                      int n = discs.size();
+                      if (back) { closeFolder(null); return; }
+                      if (n == 0) return;
+                      folderSel = Math.max(0, Math.min(n - 1, folderSel));
+                      int page = folderSel / 8, slot = folderSel % 8;
+                      int col = (slot % 4) % 2 + (slot >= 4 ? 2 : 0), row = (slot % 4) / 2;
+                      int target = -1;
+                      if (code == KeyEvent.KEYCODE_DPAD_RIGHT) target = col < 3 ? slotIndex(page, col + 1, row) : slotIndex(page + 1, 0, row);
+                      else if (code == KeyEvent.KEYCODE_DPAD_LEFT) target = col > 0 ? slotIndex(page, col - 1, row) : (page > 0 ? slotIndex(page - 1, 3, row) : -1);
+                      else if (code == KeyEvent.KEYCODE_DPAD_DOWN && row == 0) target = slotIndex(page, col, 1);
+                      else if (code == KeyEvent.KEYCODE_DPAD_UP && row == 1) target = slotIndex(page, col, 0);
+                      if (target >= n && target / 8 > page) target = n - 1;   // jump to the last disc on the next page
+                      if (target >= 0 && target < n && target != folderSel) {
+                          boolean flip = target / 8 != page;
+                          folderSel = target;
+                          play(flip ? S_WHOOSH : S_TICK, flip ? 0.35f : 0.35f, flip ? 1.6f : 1.05f);
+                          return;
+                      }
+                      if (ok && !repeat) {
+                          final Disc d = discs.get(folderSel);
+                          play(S_OPEN, 0.45f, 1f);
+                          closeFolder(() -> playDisc(d, -1));
+                          return;
+                      }
+                      if (menu) { openDiscMenu(discs.get(folderSel)); return; }
+                      return;
+                  }
+                  if (overlay == OV_PLAYER) {
+                      if (back || menu) { overlay = OV_NONE; play(S_TICK, 0.4f, 0.8f); return; }
+                      if (code == KeyEvent.KEYCODE_DPAD_RIGHT) { playerSel = (playerSel + 1) % PLAYER_BTNS.length; play(S_TICK, 0.35f, 1f); }
+                      else if (code == KeyEvent.KEYCODE_DPAD_LEFT) { playerSel = (playerSel + PLAYER_BTNS.length - 1) % PLAYER_BTNS.length; play(S_TICK, 0.35f, 1f); }
+                      else if (ok && !repeat) {
+                          switch (playerSel) {
+                              case 0: radioSkip(-1); break;
+                              case 1: radioToggle(); break;
+                              case 2: radioSkip(1); break;
+                              case 3: overlay = OV_NONE; openFolder(); break;
+                              case 4: if (nowDisc != null) openSongList(nowDisc, () -> { overlay = OV_PLAYER; }); break;
+                              case 5: stopRadio(); overlay = OV_NONE; play(S_TOGGLE, 0.45f, 0.7f); break;
+                          }
+                          if (nowDisc == null && overlay == OV_PLAYER) overlay = OV_NONE;
                       }
                       return;
                   }
@@ -1785,6 +2394,10 @@ jobs:
                       case "tv": play(S_OPEN, 0.5f, 0.9f); startIntent(new Intent(Settings.ACTION_SETTINGS), "Settings"); break;
                       case "shelf": openSettings(); break;
                       case "fire": play(S_DOOR, 0.3f, 1.3f); goScene(SCENE_FIRE); break;
+                      case "cd":
+                          facing = faceToward(px, py, CD_X, CD_Y);
+                          if (nowDisc != null) openPlayer(); else openFolder();
+                          break;
                   }
               }
 
@@ -1842,6 +2455,12 @@ jobs:
                       play(S_TOGGLE, 0.5f, 1f);
                       refreshSettings();
                   }));
+                  listItems.add(new Item("Names over belly-icon penguins", namesAlways ? "Always" : "When close", null, () -> {
+                      namesAlways = !namesAlways;
+                      prefs.edit().putBoolean("namesalways", namesAlways).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
                   listItems.add(new Item("Season", SEASON_PREF_NAMES[seasonPref], null, () -> {
                       seasonPref = (seasonPref + 1) % SEASON_PREF_NAMES.length;
                       prefs.edit().putInt("season", seasonPref).apply();
@@ -1866,6 +2485,178 @@ jobs:
                   listItems.add(new Item("Close", "", null, () -> overlay = OV_NONE));
                   listSel = Math.min(listSel, listItems.size() - 1);
                   if (overlay != OV_LIST) { listSel = 0; listScroll = 0; }
+                  overlay = OV_LIST;
+              }
+
+              // ================================================================== CD folder, player and song lists
+
+              static int slotIndex(int page, int col, int row) {
+                  return page * 8 + (col >= 2 ? 4 : 0) + row * 2 + (col % 2);
+              }
+
+              void openFolder() {
+                  overlay = OV_FOLDER;
+                  folderClosing = false;
+                  folderAnim = 0;
+                  afterFolderClose = null;
+                  if (nowDisc != null) {
+                      int i = discs.indexOf(nowDisc);
+                      if (i >= 0) folderSel = i;
+                  }
+                  folderSel = Math.max(0, Math.min(discs.size() - 1, folderSel));
+                  pEmote = E_NONE;
+                  play(S_WHOOSH, 0.4f, 0.9f);
+              }
+
+              void closeFolder(Runnable after) {
+                  folderClosing = true;
+                  afterFolderClose = after;
+                  play(S_WHOOSH, 0.3f, 1.1f);
+              }
+
+              void openPlayer() {
+                  overlay = OV_PLAYER;
+                  playerSel = 1;
+                  pEmote = E_NONE;
+                  play(S_TICK, 0.45f, 1.2f);
+              }
+
+              void openDiscMenu(Disc d) {
+                  play(S_TICK, 0.45f, 1.1f);
+                  listTitle = d.name;
+                  listOnBack = () -> { overlay = OV_FOLDER; folderAnim = 1; };
+                  listItems.clear();
+                  listItems.add(new Item("Play from a random song", "", null, () -> { overlay = OV_NONE; playDisc(d, -1); }));
+                  listItems.add(new Item("🔍  Song list", "›", null, () -> openSongList(d, () -> openDiscMenu(d))));
+                  if (!d.yt) {
+                      listItems.add(new Item("Rename this disc", "", null, () -> {
+                          overlay = OV_NONE;
+                          askName("Rename disc", d.name, v -> {
+                              if (v != null) { d.name = v; saveDiscs(); }
+                              openDiscMenu(d);
+                          });
+                      }));
+                      listItems.add(new Item("Remove this disc", "", null, () -> {
+                          if (nowDisc == d) stopRadio();
+                          discs.remove(d);
+                          saveDiscs();
+                          folderSel = Math.max(0, Math.min(discs.size() - 1, folderSel));
+                          play(S_TOGGLE, 0.5f, 0.7f);
+                          toast("Disc removed. Its songs will ask for a new disc next time.");
+                          overlay = OV_FOLDER;
+                          folderAnim = 1;
+                      }));
+                  } else {
+                      listItems.add(new Item("Open the playlist in SmartTube", "", null, () -> {
+                          overlay = OV_NONE;
+                          if (!smartTubeInstalled()) { toast("Install SmartTube to play YouTube discs"); return; }
+                          stopRadio();
+                          nowDisc = d; nowYT = true; ytActive = true; radioPaused = false; nowTitle = d.name;
+                          ytQuietSince = 0; ytGraceUntil = System.currentTimeMillis() + 30000;
+                          updateMusic();
+                          openInSmartTube("https://www.youtube.com/playlist?list=" + d.list);
+                      }));
+                  }
+                  listItems.add(new Item("Back to the folder", "", null, () -> listOnBack.run()));
+                  listSel = 0;
+                  listScroll = 0;
+                  overlay = OV_LIST;
+              }
+
+              /** The magnifying glass: every song on a disc. Pick one to start there. */
+              void openSongList(Disc d, Runnable onBack) {
+                  play(S_TICK, 0.45f, 1.1f);
+                  listTitle = "🔍  " + d.name;
+                  listOnBack = onBack;
+                  listItems.clear();
+                  listSel = 0;
+                  listScroll = 0;
+                  overlay = OV_LIST;
+                  if (d.yt) {
+                      ArrayList<String[]> tr = d.tracks;
+                      if (tr == null) {
+                          listItems.add(new Item("Loading songs…", "", null, null));
+                          if (!d.loading) {
+                              d.loading = true;
+                              new Thread(() -> {
+                                  fetchTracks(d);
+                                  d.loading = false;
+                                  gameTasks.add(() -> {
+                                      if (overlay == OV_LIST && listTitle.equals("🔍  " + d.name)) {
+                                          if (d.tracks == null || d.tracks.isEmpty()) {
+                                              listItems.clear();
+                                              listItems.add(new Item("Couldn't load the songs", "", null, null));
+                                              listItems.add(new Item("Open the playlist in SmartTube instead", "", null, () -> { overlay = OV_NONE; playYouTube(d, null, null); }));
+                                          } else {
+                                              openSongList(d, onBack);
+                                          }
+                                      }
+                                  });
+                              }, "island-tracks").start();
+                          }
+                          return;
+                      }
+                      for (int i = 0; i < tr.size(); i++) {
+                          final int idx = i;
+                          listItems.add(new Item((i + 1) + ".  " + tr.get(i)[1], "", null, () -> { overlay = OV_NONE; playDisc(d, idx); }));
+                      }
+                  } else {
+                      if (d.songs.isEmpty()) listItems.add(new Item("No songs on this disc yet", "", null, null));
+                      for (int i = 0; i < d.songs.size(); i++) {
+                          final int idx = i;
+                          listItems.add(new Item((i + 1) + ".  " + prettySong(d.songs.get(i)), "", null, () -> { overlay = OV_NONE; playDisc(d, idx); }));
+                      }
+                  }
+              }
+
+              /** "New song on the TV: which disc should it go on?" */
+              void showSongPrompt() {
+                  if (newSongs.isEmpty()) return;
+                  final String song = newSongs.get(0);
+                  play(S_TOGGLE, 0.45f, 1.2f);
+                  listTitle = "New song: " + prettySong(song);
+                  listOnBack = () -> { newSongs.remove(song); skippedSongs.add(song); overlay = OV_NONE; };
+                  listItems.clear();
+                  for (Disc d : discs) {
+                      if (d.yt) continue;
+                      listItems.add(new Item("Add to  " + d.name, d.songs.size() + " songs", null, () -> {
+                          newSongs.remove(song);
+                          d.songs.add(song);
+                          saveDiscs();
+                          play(S_OPEN, 0.45f, 1.1f);
+                          toast("Added to " + d.name);
+                          overlay = OV_NONE;
+                      }));
+                  }
+                  listItems.add(new Item("💿  Put it on a new disc", "", null, () -> {
+                      overlay = OV_NONE;
+                      int count = 0;
+                      for (Disc d : discs) if (!d.yt) count++;
+                      final int mixes = count;
+                      askName("Name the new disc", "Mix " + (mixes + 1), v -> {
+                          if (v == null) return;     // cancelled: the prompt comes back
+                          Disc d = new Disc();
+                          d.name = v;
+                          d.yt = false;
+                          d.color = MIX_COLS[mixes % MIX_COLS.length];
+                          d.songs.add(song);
+                          discs.add(d);
+                          newSongs.remove(song);
+                          saveDiscs();
+                          play(S_OPEN, 0.45f, 1.1f);
+                          toast("New disc: " + v);
+                      });
+                  }));
+                  listItems.add(new Item("Not now", "", null, () -> listOnBack.run()));
+                  listItems.add(new Item("Never ask about this song", "", null, () -> {
+                      newSongs.remove(song);
+                      Set<String> ign = new HashSet<>(prefs.getStringSet("ignoredsongs", new HashSet<String>()));
+                      ign.add(song);
+                      prefs.edit().putStringSet("ignoredsongs", ign).apply();
+                      overlay = OV_NONE;
+                  }));
+                  listSel = 0;
+                  listScroll = 0;
                   overlay = OV_LIST;
               }
 
@@ -2061,12 +2852,15 @@ jobs:
                   drawList.clear();
                   drawList.addAll(list);
                   drawList.addAll(chs);
+                  drawList.add(cdSpot);
                   drawList.add(this);
                   Collections.sort(drawList, (a, b) -> Float.compare(yOf(a), yOf(b)));
                   boolean xmas = season == SEASON_XMAS;
                   for (Object o : drawList) {
                       if (o == this) {
                           drawPlayer(c);
+                      } else if (o == cdSpot) {
+                          drawCdPlayer(c);
                       } else if (o instanceof Chair) {
                           drawChair(c, (Chair) o);
                       } else {
@@ -2111,6 +2905,7 @@ jobs:
                   c.save();
                   c.translate(-camX, -camY);
                   for (Chair ch : chs) drawChairSign(c, ch, ch == nearCh);
+                  drawCdSign(c, overlay == OV_NONE && "cd".equals(nearObject()));
                   for (AppPeng a : list) {
                       if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
                       drawSign(c, a, a == near);
@@ -2257,6 +3052,7 @@ jobs:
 
               float yOf(Object o) {
                   if (o == this) return py;
+                  if (o == cdSpot) return CD_Y;
                   if (o instanceof Chair) return ((Chair) o).y;
                   return ((AppPeng) o).y;
               }
@@ -2541,7 +3337,10 @@ jobs:
               void drawSign(Canvas c, AppPeng a, boolean highlight) {
                   float bob = (float) Math.sin(time * 2f + a.phase) * 3f;
                   if (bellyIcons) {
-                      if (highlight) drawNameTag(c, a.x, a.y - 80 + bob, a.label);
+                      // Name floats over the head like a username in a game (above the Santa hat at Christmas)
+                      float bottom = a.y - (activeSeason() == SEASON_XMAS ? 92 : 74);
+                      if (highlight) drawNameTag(c, a.x, bottom - 4 + bob, a.label);
+                      else if (namesAlways) drawUsername(c, a.x, bottom, a.label);
                       return;
                   }
                   float s = highlight ? 1.35f : 1f;
@@ -2590,6 +3389,87 @@ jobs:
                   c.drawRoundRect(rf, 14, 14, p);
                   tp.setColor(0xffffffff);
                   c.drawText(name, cx, bottom - 9, tp);
+              }
+
+              void drawUsername(Canvas c, float cx, float bottom, String label) {
+                  String name = label.length() > 16 ? label.substring(0, 15) + "…" : label;
+                  tp.setTextSize(14);
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  float tw = tp.measureText(name);
+                  rf.set(cx - tw / 2 - 7, bottom - 20, cx + tw / 2 + 7, bottom);
+                  p.setColor(0x99263238);
+                  c.drawRoundRect(rf, 10, 10, p);
+                  tp.setColor(0xffffffff);
+                  c.drawText(name, cx, bottom - 5.5f, tp);
+              }
+
+              /** The CD player: a silver portable player with headphones on a little ice table. */
+              void drawCdPlayer(Canvas c) {
+                  float x = CD_X, y = CD_Y;
+                  boolean spinning = nowDisc != null && radioBusy();
+                  // shadow
+                  p.setColor(0x30000000);
+                  c.drawOval(x - 56, y - 8, x + 56, y + 10, p);
+                  // ice table: front face then top
+                  p.setColor(0xffcfe6f3);
+                  rf.set(x - 48, y - 40, x + 48, y + 2);
+                  c.drawRoundRect(rf, 8, 8, p);
+                  p.setColor(0xffb3d4e8);
+                  c.drawRect(x - 48, y - 14, x + 48, y - 11, p);
+                  p.setColor(0xffeaf5fb);
+                  rf.set(x - 50, y - 52, x + 50, y - 32);
+                  c.drawOval(rf, p);
+                  // headphones lying beside it
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(4);
+                  p.setColor(0xff37474f);
+                  rf.set(x + 14, y - 58, x + 46, y - 34);
+                  c.drawArc(rf, 200, 140, false, p);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(0xffff7043);
+                  c.drawCircle(x + 16, y - 42, 6, p);
+                  c.drawCircle(x + 44, y - 42, 6, p);
+                  // player body
+                  float bx = x - 10, by = y - 46;
+                  p.setColor(0xff8e98a3);
+                  c.drawOval(bx - 30, by - 11, bx + 30, by + 15, p);
+                  p.setColor(0xffcfd6dd);
+                  c.drawOval(bx - 30, by - 14, bx + 30, by + 11, p);
+                  // see-through lid with the disc inside
+                  p.setColor(0xff4a5560);
+                  c.drawOval(bx - 20, by - 9, bx + 20, by + 6, p);
+                  int disc = nowDisc != null ? nowDisc.color : 0xffb0bec5;
+                  p.setColor(blend(disc, 0xffffffff, 0.25f));
+                  c.drawOval(bx - 17, by - 7.5f, bx + 17, by + 4.5f, p);
+                  // rainbow glint that spins while it plays
+                  float ang = spinning ? time * 360f : 30f;
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(2.5f);
+                  p.setColor(0xccffffff);
+                  rf.set(bx - 13, by - 5.5f, bx + 13, by + 2.5f);
+                  c.drawArc(rf, ang, 50, false, p);
+                  p.setColor(0x8800e5ff);
+                  c.drawArc(rf, ang + 180, 40, false, p);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(0xff4a5560);
+                  c.drawOval(bx - 3, by - 2.5f, bx + 3, by + 0.5f, p);
+                  // little green "playing" light
+                  p.setColor(spinning ? (((int) (time * 2) % 2 == 0) ? 0xff76ff03 : 0xff33691e) : 0xff607d8b);
+                  c.drawCircle(bx + 22, by + 4, 2.2f, p);
+              }
+
+              void drawCdSign(Canvas c, boolean highlight) {
+                  String t = nowDisc != null ? "♪ " + nowDisc.name + (radioBusy() ? "" : " (paused)") : "CD player";
+                  tp.setTextSize(highlight ? 19 : 15);
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  float tw = tp.measureText(t);
+                  float h = highlight ? 30 : 24;
+                  float cy = CD_Y - 72 - (highlight ? 6 : 0);
+                  rf.set(CD_X - tw / 2 - 14, cy - h, CD_X + tw / 2 + 14, cy);
+                  p.setColor(highlight ? 0xff6a1b9a : 0xd0263238);
+                  c.drawRoundRect(rf, h / 2, h / 2, p);
+                  tp.setColor(0xffffffff);
+                  c.drawText(t, CD_X, cy - h / 2 + (highlight ? 7 : 5.5f), tp);
               }
 
               void drawBubble(Canvas c, float x, float y, String text, boolean tailRight) {
@@ -2754,15 +3634,14 @@ jobs:
                       c.drawCircle(emberX[i], emberY[i], 5 + 4 * g, p);
                   }
 
-                  // logs
-                  drawLog(c, 640, 610, 520, 52, -6, flick);
-                  drawLog(c, 560, 585, 360, 46, 14, flick);
-                  drawLog(c, 730, 588, 360, 46, -16, flick);
+                  // back logs (the flames grow out from between these)
+                  drawLog(c, 560, 580, 360, 46, 14, flick);
+                  drawLog(c, 730, 583, 360, 46, -16, flick);
 
                   // flames: several tongues, four colour layers from deep orange to white-hot
                   int[] cols = {0xd9ff3d00, 0xe6ff8f00, 0xf0ffca28, 0xfffff3c4};
                   float[] scales = {1f, 0.78f, 0.55f, 0.3f};
-                  float by = 600;
+                  float by = 622;
                   for (int layer = 0; layer < 4; layer++) {
                       p.setColor(cols[layer]);
                       float ls = scales[layer];
@@ -2773,7 +3652,7 @@ jobs:
                                   + 0.07f * (float) Math.sin(time * 13.7f + i * 0.9f);
                           float hgt = base * n * (0.55f + 0.45f * ls) * (layer == 3 ? 0.6f : 1f);
                           float w = 52 * ls + 6;
-                          float fx = 400 + i * 48;
+                          float fx = 420 + i * 44;
                           float sx = (float) Math.sin(time * 2.3f + i) * 26 + (float) Math.sin(time * 5.1f + i * 2) * 9;
                           path.reset();
                           path.moveTo(fx - w, by);
@@ -2783,6 +3662,9 @@ jobs:
                           c.drawPath(path, p);
                       }
                   }
+
+                  // front log sits in front of the flames, hiding where they start
+                  drawLog(c, 640, 614, 600, 54, -4, flick);
 
                   // seasonal mantle decor
                   int season = activeSeason();
@@ -2854,6 +3736,12 @@ jobs:
                       wl1 = w.emoji + "  " + Math.round(w.tempC) + "°  " + w.desc;
                       wl2 = (w.city.isEmpty() ? "" : w.city + "  ·  ") + "wind " + Math.round(w.windKmh) + " km/h";
                   }
+                  String np = null;
+                  if (nowDisc != null) {
+                      String nt = nowTitle == null || nowTitle.isEmpty() ? nowDisc.name : nowTitle;
+                      if (nt.length() > 32) nt = nt.substring(0, 31) + "…";
+                      np = "♪  " + (radioBusy() ? "" : "Paused · ") + nt;
+                  }
 
                   tp.setTextAlign(Paint.Align.RIGHT);
                   tp.setTextSize(40);
@@ -2865,8 +3753,11 @@ jobs:
                       tp.setTextSize(16);
                       wMax = Math.max(wMax, tp.measureText(wl2));
                   }
+                  if (np != null) { tp.setTextSize(17); wMax = Math.max(wMax, tp.measureText(np)); }
                   float right = VW - 30, top = 22;
                   float bottom = wl1 != null ? 160 : 102;
+                  float npY = bottom + 4;
+                  if (np != null) bottom += 30;
                   rf.set(right - wMax - 36, top, right, bottom);
                   p.setColor(0x8c0f1c2a);
                   c.drawRoundRect(rf, 18, 18, p);
@@ -2886,6 +3777,11 @@ jobs:
                       tp.setColor(0xffb0bec5);
                       c.drawText(wl2, tx, top + 126, tp);
                   }
+                  if (np != null) {
+                      tp.setTextSize(17);
+                      tp.setColor(0xffe1bee7);
+                      c.drawText(np, tx, npY + 12, tp);
+                  }
 
                   if (msg != null) {
                       tp.setTextAlign(Paint.Align.CENTER);
@@ -2902,7 +3798,208 @@ jobs:
               void drawOverlays(Canvas c) {
                   if (overlay == OV_WHEEL) drawWheel(c);
                   else if (overlay == OV_LIST) drawListPanel(c);
+                  else if (overlay == OV_FOLDER) drawFolder(c);
+                  else if (overlay == OV_PLAYER) drawPlayerPanel(c);
                   if (fade > 0) c.drawColor(((int) (fade * 255)) << 24);
+              }
+
+              /** A zip-up 2000s CD binder: two pages of plastic sleeves, four discs a page. */
+              void drawFolder(Canvas c) {
+                  float a = folderAnim;
+                  float e = 1 - (1 - a) * (1 - a) * (1 - a);
+                  c.drawColor(((int) (e * 150)) << 24);
+                  float w = 1090, h = 610;
+                  float l = (VW - w) / 2, t0 = (VH - h) / 2;
+                  float t = t0 + (1 - e) * (VH - t0 + 20);
+
+                  // nylon cover with a zipper all the way round
+                  rf.set(l, t, l + w, t + h);
+                  p.setColor(0xff151a24);
+                  c.drawRoundRect(rf, 34, 34, p);
+                  p.setColor(0xff5b626d);
+                  for (float zx = l + 40; zx < l + w - 40; zx += 9) {
+                      c.drawRect(zx, t + 7, zx + 5, t + 13, p);
+                      c.drawRect(zx, t + h - 13, zx + 5, t + h - 7, p);
+                  }
+                  for (float zy = t + 40; zy < t + h - 40; zy += 9) {
+                      c.drawRect(l + 7, zy, l + 13, zy + 5, p);
+                      c.drawRect(l + w - 13, zy, l + w - 7, zy + 5, p);
+                  }
+                  p.setColor(0xffb7bec6);
+                  rf.set(l + w - 92, t + 1, l + w - 62, t + 19);
+                  c.drawRoundRect(rf, 5, 5, p);
+                  p.setColor(0xff151a24);
+                  rf.set(l + w - 84, t + 6, l + w - 70, t + 14);
+                  c.drawRoundRect(rf, 3, 3, p);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(2);
+                  p.setColor(0xff2d3545);
+                  rf.set(l + 20, t + 20, l + w - 20, t + h - 20);
+                  c.drawRoundRect(rf, 22, 22, p);
+                  p.setStyle(Paint.Style.FILL);
+                  // spine
+                  p.setColor(0xff0d1118);
+                  c.drawRect(l + w / 2 - 14, t + 20, l + w / 2 + 14, t + h - 20, p);
+
+                  int n = discs.size();
+                  int sel = Math.max(0, Math.min(n - 1, folderSel));
+                  int page = sel / 8;
+                  int pages = Math.max(1, (n + 7) / 8);
+                  float pw = w / 2 - 50, ph = h - 112;
+                  float sw = pw / 2 - 18, sh = ph / 2 - 18;
+                  float selX = 0, selY = 0;
+                  for (int side = 0; side < 2; side++) {
+                      float pl = side == 0 ? l + 30 : l + w / 2 + 20, pt = t + 30;
+                      rf.set(pl, pt, pl + pw, pt + ph);
+                      p.setColor(0xff222a37);
+                      c.drawRoundRect(rf, 16, 16, p);
+                      for (int k = 0; k < 4; k++) {
+                          int idx = page * 8 + side * 4 + k;
+                          float sl = pl + 12 + (k % 2) * (sw + 12), st = pt + 12 + (k / 2) * (sh + 12);
+                          float dcx = sl + sw / 2, dcy = st + sh / 2 + 6;
+                          if (idx < n && idx == sel) { selX = dcx; selY = dcy; }
+                          else if (idx < n) drawDisc(c, dcx, dcy, 90, discs.get(idx), false);
+                          // clear plastic sleeve over the disc
+                          rf.set(sl, st, sl + sw, st + sh);
+                          p.setColor(0x1effffff);
+                          c.drawRoundRect(rf, 10, 10, p);
+                          p.setStyle(Paint.Style.STROKE);
+                          p.setStrokeWidth(2);
+                          p.setColor(0x50ffffff);
+                          c.drawRoundRect(rf, 10, 10, p);
+                          p.setStyle(Paint.Style.FILL);
+                          p.setColor(0x40ffffff);
+                          c.drawRect(sl + 8, st + 14, sl + sw - 8, st + 16, p);
+                          p.setColor(0x14ffffff);
+                          path.reset();
+                          path.moveTo(sl + sw * 0.55f, st + 2);
+                          path.lineTo(sl + sw * 0.8f, st + 2);
+                          path.lineTo(sl + sw * 0.35f, st + sh - 2);
+                          path.lineTo(sl + sw * 0.1f, st + sh - 2);
+                          path.close();
+                          c.drawPath(path, p);
+                      }
+                  }
+                  // The chosen disc slides up out of its sleeve
+                  if (n > 0) {
+                      Disc d = discs.get(sel);
+                      float lift = 24 + (float) Math.sin(time * 3) * 3;
+                      p.setColor(0x50000000);
+                      c.drawOval(selX - 90, selY + 70, selX + 90, selY + 96, p);
+                      drawDisc(c, selX, selY - lift, 100, d, true);
+
+                      String info = d.yt ? "YouTube playlist" : d.songs.size() + (d.songs.size() == 1 ? " song" : " songs");
+                      if (d == nowDisc) info += "  ·  in the player";
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      tp.setTextSize(23);
+                      tp.setColor(0xffffffff);
+                      c.drawText(d.name + "   ·   " + info, VW / 2f, t + h - 50, tp);
+                  }
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  tp.setTextSize(14);
+                  tp.setColor(0xff90a4ae);
+                  c.drawText("Page " + (page + 1) + " of " + pages + "   ·   OK to play   ·   Info for the song list   ·   Back to close",
+                          VW / 2f, t + h - 27, tp);
+              }
+
+              void drawDisc(Canvas c, float cx, float cy, float r, Disc d, boolean sel) {
+                  p.setColor(0x40000000);
+                  c.drawCircle(cx + 3, cy + 5, r, p);
+                  if (sel) {
+                      p.setColor(0x55ffffff);
+                      c.drawCircle(cx, cy, r + 7, p);
+                  }
+                  p.setColor(0xffdfe4ea);
+                  c.drawCircle(cx, cy, r, p);
+                  p.setShader(new LinearGradient(cx - r, cy - r, cx + r, cy + r,
+                          blend(d.color, 0xffffffff, 0.22f), blend(d.color, 0xff000000, 0.28f), Shader.TileMode.CLAMP));
+                  c.drawCircle(cx, cy, r * 0.95f, p);
+                  p.setShader(null);
+                  // shiny rainbow streaks
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(r * 0.09f);
+                  rf.set(cx - r * 0.72f, cy - r * 0.72f, cx + r * 0.72f, cy + r * 0.72f);
+                  p.setColor(0x38ffffff);
+                  c.drawArc(rf, 205, 65, false, p);
+                  p.setColor(0x3000e5ff);
+                  c.drawArc(rf, 25, 55, false, p);
+                  p.setColor(0x26ff4081);
+                  rf.set(cx - r * 0.58f, cy - r * 0.58f, cx + r * 0.58f, cy + r * 0.58f);
+                  c.drawArc(rf, 35, 40, false, p);
+                  p.setStyle(Paint.Style.FILL);
+                  // clear centre hub
+                  p.setColor(0xffeef2f6);
+                  c.drawCircle(cx, cy, r * 0.3f, p);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(1.5f);
+                  p.setColor(0x55000000);
+                  c.drawCircle(cx, cy, r * 0.3f, p);
+                  c.drawCircle(cx, cy, r * 0.19f, p);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(0xff1a212c);
+                  c.drawCircle(cx, cy, r * 0.1f, p);
+                  // label
+                  String nm = d.name.length() > 13 ? d.name.substring(0, 12) + "…" : d.name;
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  tp.setTextSize(r * 0.22f);
+                  tp.setColor(0x66000000);
+                  c.drawText(nm, cx + 1.5f, cy - r * 0.47f + 1.5f, tp);
+                  tp.setColor(0xffffffff);
+                  c.drawText(nm, cx, cy - r * 0.47f, tp);
+                  tp.setTextSize(r * 0.13f);
+                  tp.setColor(0xddffffff);
+                  c.drawText(d.yt ? "▶ YouTube" : "♫ " + d.songs.size() + (d.songs.size() == 1 ? " song" : " songs"), cx, cy + r * 0.6f, tp);
+              }
+
+              /** The CD player up close: what's playing, plus buttons. */
+              void drawPlayerPanel(Canvas c) {
+                  c.drawColor(0x66000000);
+                  Disc d = nowDisc;
+                  float w = 760, h = 250;
+                  float l = (VW - w) / 2, t = VH - h - 40;
+                  rf.set(l, t, l + w, t + h);
+                  p.setColor(0xf0161d29);
+                  c.drawRoundRect(rf, 28, 28, p);
+                  boolean playing = d != null && radioBusy();
+                  if (d != null) {
+                      c.save();
+                      c.rotate(playing ? (time * 140) % 360 : 0, l + 120, t + 112);
+                      drawDisc(c, l + 120, t + 112, 82, d, false);
+                      c.restore();
+                  }
+                  float tx = l + 230;
+                  tp.setTextAlign(Paint.Align.LEFT);
+                  tp.setTextSize(28);
+                  tp.setColor(0xffffffff);
+                  c.drawText(d != null ? d.name : "No disc", tx, t + 56, tp);
+                  String nt = nowTitle == null ? "" : nowTitle;
+                  if (nt.length() > 40) nt = nt.substring(0, 39) + "…";
+                  tp.setTextSize(19);
+                  tp.setColor(0xffcfd8dc);
+                  c.drawText(nt, tx, t + 88, tp);
+                  tp.setTextSize(15);
+                  tp.setColor(playing ? 0xffa5d6a7 : 0xffffcc80);
+                  c.drawText((playing ? "Playing" : "Paused") + (nowYT ? " in SmartTube" : ""), tx, t + 114, tp);
+
+                  float by = t + 172, gap = 82;
+                  float bx0 = tx + 20;
+                  for (int i = 0; i < PLAYER_BTNS.length; i++) {
+                      float bx = bx0 + i * gap;
+                      p.setColor(i == playerSel ? 0xff2e7dbd : 0xff263142);
+                      c.drawCircle(bx, by, 30, p);
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      tp.setTextSize(i == playerSel ? 28 : 24);
+                      tp.setColor(0xffffffff);
+                      c.drawText(PLAYER_BTNS[i], bx, by + 9, tp);
+                  }
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  tp.setTextSize(15);
+                  tp.setColor(0xffffffff);
+                  c.drawText(PLAYER_BTN_NAMES[playerSel], bx0 + playerSel * gap, by + 52, tp);
+                  tp.setTextAlign(Paint.Align.RIGHT);
+                  tp.setTextSize(13);
+                  tp.setColor(0xff90a4ae);
+                  c.drawText("Back to close", l + w - 24, t + 30, tp);
               }
 
               void drawWheel(Canvas c) {
@@ -3052,17 +4149,17 @@ jobs:
                   return out;
               }
 
+              /** A soft, low "coo" for penguins (much gentler than the old squeak). */
               static float[] chirp() {
-                  int n = (int) (RATE * 0.16);
+                  int n = (int) (RATE * 0.15);
                   float[] out = new float[n];
                   double ph = 0;
                   for (int i = 0; i < n; i++) {
                       float t = i / (float) n;
-                      double f = t < 0.45 ? 1050 + 650 * (t / 0.45) : 1700 - 350 * ((t - 0.45) / 0.55);
-                      f += Math.sin(i / (double) RATE * 2 * Math.PI * 28) * 40;
+                      double f = t < 0.4 ? 560 + 160 * (t / 0.4) : 720 - 140 * ((t - 0.4) / 0.6);
                       ph += 2 * Math.PI * f / RATE;
-                      float env = (float) (Math.min(1, t * 25) * Math.pow(1 - t, 1.6));
-                      out[i] = (float) (Math.sin(ph) + 0.25 * Math.sin(2 * ph)) * env * 0.32f;
+                      float env = (float) (Math.min(1, t * 12) * Math.pow(1 - t, 1.8));
+                      out[i] = (float) (Math.sin(ph) + 0.12 * Math.sin(2 * ph)) * env * 0.3f;
                   }
                   return out;
               }
@@ -3132,47 +4229,68 @@ jobs:
               }
 
               /**
-               * Fireplace crackle, about 7 seconds, made to loop: a low rumble, soft hiss,
-               * lots of tiny pops and the occasional big snap. Pops near the end wrap to the start.
+               * Fireplace, about 8 seconds, made to loop: a deep soft roar that breathes,
+               * clusters of tiny sharp crackles, and now and then a dry snap. Everything wraps
+               * around the end so the loop has no seam.
                */
               static float[] crackle() {
-                  Random r = new Random(77);
-                  int n = (int) (RATE * 7.0);
+                  Random r = new Random(4242);
+                  int n = (int) (RATE * 8.0);
                   float[] out = new float[n];
-                  float lp = 0, lp2 = 0;
-                  for (int i = 0; i < n; i++) {
-                      float w = r.nextFloat() * 2 - 1;
-                      lp += 0.02f * (w - lp);
-                      lp2 += 0.5f * (w - lp2);
-                      float swell = 0.8f + 0.2f * (float) Math.sin(2 * Math.PI * i / n * 3);
-                      out[i] = lp * 0.9f * swell + (w - lp2) * 0.012f;
-                  }
-                  // pops: mostly tiny, a few bigger
-                  double t = 0;
-                  while (t < 7.0) {
-                      t += -Math.log(1 - r.nextDouble()) / 14.0;
-                      int at = (int) (t * RATE);
-                      float size = (float) Math.pow(r.nextFloat(), 3);
-                      int len = (int) (RATE * (0.002 + size * 0.012));
-                      float amp = 0.12f + size * 0.75f;
-                      float plp = 0;
-                      float cut = 0.3f + r.nextFloat() * 0.6f;
-                      for (int k = 0; k < len; k++) {
-                          float e = (float) Math.pow(1 - k / (float) len, 4);
-                          plp += cut * ((r.nextFloat() * 2 - 1) - plp);
-                          out[(at + k) % n] += plp * e * amp;
+                  // Roar: noise through two gentle low-pass filters (around 250 Hz), slowly swelling
+                  float a = 0, b = 0, gain = 0.8f, target = 0.8f;
+                  for (int pass = 0; pass < 2; pass++) {          // run twice so the filter is settled at the loop point
+                      for (int i = 0; i < n; i++) {
+                          if (i % 2205 == 0) target = 0.55f + r.nextFloat() * 0.45f;
+                          gain += (target - gain) * 0.0004f;
+                          float w = r.nextFloat() * 2 - 1;
+                          a += 0.07f * (w - a);
+                          b += 0.07f * (a - b);
+                          if (pass == 1) out[i] = b * 3.5f * gain;
                       }
                   }
-                  // a few snaps: double crack with a woody body
-                  for (int s = 0; s < 5; s++) {
-                      int at = r.nextInt(n);
-                      for (int hit = 0; hit < 2; hit++) {
-                          int start = at + hit * (int) (RATE * (0.015 + r.nextFloat() * 0.02));
-                          int len = (int) (RATE * 0.03);
-                          for (int k = 0; k < len; k++) {
-                              float e = (float) Math.pow(1 - k / (float) len, 5);
-                              double body = Math.sin(2 * Math.PI * (700 + r.nextFloat() * 50) * k / RATE);
-                              out[(start + k) % n] += (float) ((r.nextFloat() * 2 - 1) * 0.7 + body * 0.3) * e * 0.8f;
+                  // Crackles: very short clicks (a millisecond or two) in little bursts
+                  double t = 0;
+                  while (true) {
+                      t += -Math.log(1 - r.nextDouble()) / 3.2;   // about 3 bursts a second
+                      if (t >= 8.0) break;
+                      int clicks = 1 + r.nextInt(6);
+                      double ct = t;
+                      for (int k = 0; k < clicks; k++) {
+                          ct += 0.004 + r.nextDouble() * 0.035;
+                          int at = (int) (ct * RATE);
+                          float amp = 0.15f + (float) Math.pow(r.nextFloat(), 2.5) * 0.6f;
+                          int len = 12 + r.nextInt(30);
+                          float prev = 0;
+                          for (int s = 0; s < len; s++) {
+                              float e = (float) Math.exp(-s / (len * 0.22));
+                              float w = r.nextFloat() * 2 - 1;
+                              float hp = w - prev;                      // crisp, bright click, no tone
+                              prev = w;
+                              out[(at + s) % n] += hp * e * amp;
+                          }
+                      }
+                  }
+                  // Snaps: a sharp dry crack with a short burst of smaller crackles after it
+                  for (int sn = 0; sn < 3; sn++) {
+                      int at = (int) ((0.8 + sn * 2.6 + r.nextDouble() * 1.4) * RATE);
+                      int len = (int) (RATE * 0.012);
+                      float prev = 0;
+                      for (int s = 0; s < len; s++) {
+                          float e = (float) Math.exp(-s / (len * 0.18));
+                          float w = r.nextFloat() * 2 - 1;
+                          out[(at + s) % n] += (w - prev) * e * 0.95f;
+                          prev = w;
+                      }
+                      for (int k = 0; k < 5; k++) {
+                          int at2 = at + (int) (RATE * (0.02 + r.nextDouble() * 0.25));
+                          int l2 = 10 + r.nextInt(20);
+                          float pv = 0;
+                          for (int s = 0; s < l2; s++) {
+                              float e = (float) Math.exp(-s / (l2 * 0.25));
+                              float w = r.nextFloat() * 2 - 1;
+                              out[(at2 + s) % n] += (w - pv) * e * 0.25f;
+                              pv = w;
                           }
                       }
                   }
@@ -3204,8 +4322,6 @@ jobs:
                       int[] ch = chords[bar % chords.length];
                       int barStart = (int) (bar * 4 * beat * RATE);
 
-                      // Warm pad
-                      for (int k = 1; k < 4; k++) addPad(out, barStart, (int) (4 * beat * RATE), midi(ch[k] + 12), 0.035f);
                       // Soft bass on beats 1 and 3
                       addBass(out, barStart, midi(ch[0] - 12), 0.16f, 1.6f * beat);
                       addBass(out, barStart + (int) (2 * beat * RATE), midi(ch[0] - 12 + (bar % 2 == 0 ? 7 : 0)), 0.11f, 1.6f * beat);
@@ -3449,7 +4565,7 @@ jobs:
                   HttpURLConnection con = (HttpURLConnection) new URL(u).openConnection();
                   con.setConnectTimeout(8000);
                   con.setReadTimeout(8000);
-                  con.setRequestProperty("User-Agent", "SnowIsland/2");
+                  con.setRequestProperty("User-Agent", "SnowIsland/4");
                   try (InputStream in = con.getInputStream()) {
                       ByteArrayOutputStream bo = new ByteArrayOutputStream();
                       byte[] buf = new byte[4096];
