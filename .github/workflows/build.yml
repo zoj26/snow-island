@@ -131,6 +131,15 @@ jobs:
                           <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <service
+                      android:name=".MediaListener"
+                      android:label="Snow Island"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
               </application>
           </manifest>
           SNOW_EOF
@@ -175,6 +184,7 @@ jobs:
 
           import android.app.Activity;
           import android.app.AlertDialog;
+          import android.content.ComponentName;
           import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
@@ -193,7 +203,11 @@ jobs:
           import android.graphics.drawable.Drawable;
           import android.media.AudioAttributes;
           import android.media.AudioManager;
+          import android.media.MediaMetadata;
           import android.media.MediaPlayer;
+          import android.media.session.MediaController;
+          import android.media.session.MediaSessionManager;
+          import android.media.session.PlaybackState;
           import android.media.SoundPool;
           import android.media.tv.TvContract;
           import android.media.tv.TvInputInfo;
@@ -396,9 +410,13 @@ jobs:
               int cdIndex;
               boolean cdResumeOnReturn;
               float nextCdNote;
-              volatile boolean returnPending, ytTriedSingle, ytConfirmSingle;
-              volatile long ytStartCheck;
-              volatile String ytVid;
+              volatile boolean returnPending, mediaAccess, ytUserPaused, ytSawPlaying;
+              volatile long ytJudgeAfter;
+              volatile String ytSeenTitle;
+              final ArrayList<Integer> ytOrder = new ArrayList<>();
+              int ytPos;
+              float cdVolume = 1f;
+              int playerRow;
               volatile long returnDeadline;
               int returnHits;
 
@@ -501,6 +519,7 @@ jobs:
                   namesAlways = prefs.getBoolean("namesalways", true);
                   autoReturn = prefs.getBoolean("autoreturn", true);
                   clockSize = prefs.getInt("clocksize", 2);
+                  cdVolume = prefs.getFloat("cdvol", 1f);
                   hidden.addAll(prefs.getStringSet("hidden", new HashSet<String>()));
                   loadDiscs();
 
@@ -661,7 +680,7 @@ jobs:
                                   int rid = getResources().getIdentifier("fire", "raw", getPackageName());
                                   if (rid != 0) { soundIds[8] = sounds.load(this, rid, 1); continue; }
                               }
-                              File f = new File(dir, (i == 1 ? "sfx4_" : i == 8 ? "sfx7_" : "sfx2_") + names[i] + ".wav");
+                              File f = new File(dir, (i == 1 ? "sfx4_" : i == 8 ? "sfx9_" : "sfx2_") + names[i] + ".wav");
                               if (!f.exists()) {
                                   float[] data;
                                   switch (i) {
@@ -907,6 +926,7 @@ jobs:
                       mp.setDataSource(new File(musicDir(), song).getAbsolutePath());
                       mp.setOnCompletionListener(m -> { cdIndex++; startCdTrack(); });
                       mp.prepare();
+                      mp.setVolume(cdVolume, cdVolume);
                       cdPlayer = mp;
                       nowTitle = prettySong(song);
                       if (resumed) { mp.start(); cdPlaying = true; }
@@ -922,11 +942,23 @@ jobs:
                   Disc d = nowDisc;
                   if (d == null) return;
                   if (nowYT) {
-                      mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
-                      radioPaused = !radioPaused;
+                      MediaController mc = smartTubeSession();
+                      boolean wasPaused = radioPaused;
+                      if (mc != null) {
+                          try {
+                              PlaybackState st = mc.getPlaybackState();
+                              boolean playing = st != null && st.getState() == PlaybackState.STATE_PLAYING;
+                              if (playing) mc.getTransportControls().pause(); else mc.getTransportControls().play();
+                              radioPaused = playing;
+                          } catch (Exception ex) { mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE); radioPaused = !wasPaused; }
+                      } else {
+                          mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+                          radioPaused = !wasPaused;
+                      }
                       ytActive = true;
                       ytQuietSince = 0;
                       ytGraceUntil = System.currentTimeMillis() + 8000;
+                      ytUserPaused = radioPaused;
                       updateMusic();
                   } else {
                       runOnUiThread(() -> {
@@ -944,13 +976,21 @@ jobs:
               void radioSkip(int dir) {
                   if (nowDisc == null) return;
                   if (nowYT) {
-                      mediaKey(dir > 0 ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
-                      nowTitle = nowDisc.name;
+                      // SmartTube is playing the playlist, so its own next/previous stay on the disc
+                      MediaController mc = smartTubeSession();
+                      boolean done = false;
+                      if (mc != null) {
+                          try {
+                              if (dir > 0) mc.getTransportControls().skipToNext(); else mc.getTransportControls().skipToPrevious();
+                              done = true;
+                          } catch (Exception ignored) { }
+                      }
+                      if (!done) mediaKey(dir > 0 ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
                       radioPaused = false;
-                      ytActive = true;
-                      ytQuietSince = 0;
+                      ytUserPaused = false;
                       ytGraceUntil = System.currentTimeMillis() + 8000;
                       updateMusic();
+                      play(S_TICK, 0.45f, dir > 0 ? 1.2f : 0.9f);
                   } else {
                       runOnUiThread(() -> {
                           // "Previous" restarts the song if it's more than a few seconds in
@@ -969,7 +1009,11 @@ jobs:
               }
 
               void stopRadio() {
-                  if (nowYT && ytActive && !radioPaused) mediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE);
+                  if (nowYT && ytActive && !radioPaused) {
+                      MediaController mc = smartTubeSession();
+                      try { if (mc != null) mc.getTransportControls().pause(); else mediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE); }
+                      catch (Exception ex) { mediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE); }
+                  }
                   nowDisc = null;
                   nowYT = false;
                   ytActive = false;
@@ -985,6 +1029,11 @@ jobs:
                   });
               }
 
+              /**
+               * Plays a YouTube disc in SmartTube. SmartTube plays the playlist in order by itself (no
+               * suggestions, no screen flashing between songs); Snow Island just watches and controls it.
+               * Starting the whole disc shows SmartTube's song list, where you pick the first song once.
+               */
               void playYouTube(Disc d, String videoId, String title) {
                   if (!smartTubeInstalled()) {
                       toast("Install SmartTube to play YouTube discs");
@@ -994,38 +1043,48 @@ jobs:
                   nowDisc = d;
                   nowYT = true;
                   radioPaused = false;
+                  ytUserPaused = false;
                   ytActive = true;
                   ytQuietSince = 0;
                   ytGraceUntil = System.currentTimeMillis() + 30000;
                   nowTitle = title != null ? title : d.name;
                   updateMusic();
-                  new Thread(() -> {
-                      String vid = videoId, t = title;
-                      ArrayList<String[]> tr = fetchTracks(d);
-                      if (vid == null && tr != null && !tr.isEmpty()) {
-                          // Start from a random song in the playlist
-                          String[] pick = tr.get(rnd.nextInt(tr.size()));
-                          vid = pick[0];
-                          t = pick[1];
+                  int index = 1;
+                  ArrayList<String[]> tr = d.tracks;
+                  if (videoId != null && tr != null) for (int i = 0; i < tr.size(); i++) if (tr.get(i)[0].equals(videoId)) { index = i + 1; break; }
+                  String url = videoId != null
+                          ? "https://www.youtube.com/watch?v=" + videoId + "&list=" + d.list + "&index=" + index
+                          : "https://www.youtube.com/playlist?list=" + d.list;
+                  openInSmartTube(url);
+                  armReturn();
+              }
+
+              void armReturn() {
+                  if (!autoReturn) return;
+                  returnHits = 0;
+                  returnDeadline = System.currentTimeMillis() + 300000;
+                  returnPending = true;
+              }
+
+              /**
+               * SmartTube's "now playing" controls, if Snow Island has been allowed to see them
+               * (adb shell cmd notification allow_listener com.josh.snowisland/com.josh.snowisland.MediaListener).
+               */
+              MediaController smartTubeSession() {
+                  try {
+                      MediaSessionManager msm = (MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE);
+                      List<MediaController> list = msm.getActiveSessions(new ComponentName(this, MediaListener.class));
+                      mediaAccess = true;
+                      String pk = smartTubePkg();
+                      for (MediaController mc : list) {
+                          String mp = mc.getPackageName();
+                          if (mp == null) continue;
+                          if (mp.equals(pk) || mp.toLowerCase(Locale.US).contains("smarttube")) return mc;
                       }
-                      int index = 1;
-                      if (vid != null && tr != null) for (int i = 0; i < tr.size(); i++) if (tr.get(i)[0].equals(vid)) { index = i + 1; break; }
-                      nowTitle = t != null ? t : d.name;
-                      boolean single = prefs.getBoolean("ytsingle", false);
-                      String url = vid == null ? "https://www.youtube.com/playlist?list=" + d.list
-                              : single ? "https://www.youtube.com/watch?v=" + vid
-                              : "https://www.youtube.com/watch?v=" + vid + "&list=" + d.list + "&index=" + index;
-                      ytVid = vid;
-                      ytTriedSingle = single;
-                      ytConfirmSingle = false;
-                      ytStartCheck = System.currentTimeMillis() + 15000;
-                      openInSmartTube(url);
-                      if (autoReturn) {
-                          returnHits = 0;
-                          returnDeadline = System.currentTimeMillis() + 300000;
-                          returnPending = true;
-                      }
-                  }, "island-disc").start();
+                  } catch (Exception ex) {
+                      mediaAccess = false;
+                  }
+                  return null;
               }
 
               /** Finds SmartTube on the TV: by its known app names, or by looking for an app called "SmartTube". */
@@ -1086,6 +1145,7 @@ jobs:
                   } catch (Exception ignored) { }
                   if (!out.isEmpty()) {
                       d.tracks = out;
+                      fillTitles(d, out);
                       try {
                           JSONArray a = new JSONArray();
                           for (String[] t : out) { JSONArray p = new JSONArray(); p.put(t[0]); p.put(t[1]); a.put(p); }
@@ -1100,6 +1160,45 @@ jobs:
                   } catch (Exception ignored) { }
                   if (!out.isEmpty()) d.tracks = out;
                   return out;
+              }
+
+              /** Looks up each song's real name (YouTube's simple "oEmbed" lookup), remembering them. Runs in the background. */
+              void fillTitles(Disc d, ArrayList<String[]> tracks) {
+                  new Thread(() -> {
+                      boolean changed = false;
+                      for (String[] t : tracks) {
+                          String cached = prefs.getString("ytt_" + t[0], null);
+                          if (cached != null) { if (!cached.equals(t[1])) { t[1] = cached; changed = true; } continue; }
+                          try {
+                              HttpURLConnection con = (HttpURLConnection) new URL("https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D" + t[0]).openConnection();
+                              con.setConnectTimeout(6000);
+                              con.setReadTimeout(6000);
+                              String body;
+                              try (InputStream in = con.getInputStream()) {
+                                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                                  byte[] buf = new byte[4096];
+                                  int n;
+                                  while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                                  body = bo.toString("UTF-8");
+                              } finally {
+                                  con.disconnect();
+                              }
+                              String title = new JSONObject(body).optString("title", "");
+                              if (!title.isEmpty()) {
+                                  t[1] = title;
+                                  prefs.edit().putString("ytt_" + t[0], title).apply();
+                                  changed = true;
+                              }
+                          } catch (Exception ignored) { }
+                      }
+                      if (changed) {
+                          try {
+                              JSONArray a = new JSONArray();
+                              for (String[] t : tracks) { JSONArray p2 = new JSONArray(); p2.put(t[0]); p2.put(t[1]); a.put(p2); }
+                              prefs.edit().putString("tracks_" + d.list, a.toString()).apply();
+                          } catch (Exception ignored) { }
+                      }
+                  }, "island-titles").start();
               }
 
               static void parseTracks(String html, String list, ArrayList<String[]> out) {
@@ -1174,29 +1273,36 @@ jobs:
               void startRadioWatch() {
                   Thread t = new Thread(() -> {
                       while (!destroyed) {
-                          try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
-                          // 15 seconds after starting a disc: if SmartTube is just showing the song list instead
-                          // of playing, open the song on its own instead (and remember that works)
-                          if (nowYT && ytStartCheck > 0 && System.currentTimeMillis() > ytStartCheck) {
-                              ytStartCheck = 0;
-                              boolean on = false;
-                              try { on = ((AudioManager) getSystemService(AUDIO_SERVICE)).isMusicActive(); } catch (Exception ignored) { }
-                              if (on && ytConfirmSingle) prefs.edit().putBoolean("ytsingle", true).apply();
-                              if (!on && !ytTriedSingle && ytVid != null) {
-                                  ytTriedSingle = true;
-                                  ytConfirmSingle = true;
-                                  ytStartCheck = System.currentTimeMillis() + 15000;
-                                  openInSmartTube("https://www.youtube.com/watch?v=" + ytVid);
-                                  if (autoReturn) { returnHits = 0; returnDeadline = System.currentTimeMillis() + 300000; returnPending = true; }
-                              }
+                          try { Thread.sleep(1500); } catch (InterruptedException ignored) { }
+                          long now = System.currentTimeMillis();
+                          MediaController mc = nowYT ? smartTubeSession() : null;
+                          boolean stPlaying = false;
+                          if (mc != null) {
+                              // We can see exactly what SmartTube is doing
+                              try {
+                                  PlaybackState st = mc.getPlaybackState();
+                                  int state = st != null ? st.getState() : PlaybackState.STATE_NONE;
+                                  stPlaying = state == PlaybackState.STATE_PLAYING;
+                                  MediaMetadata md = mc.getMetadata();
+                                  String title = md != null ? md.getString(MediaMetadata.METADATA_KEY_TITLE) : null;
+                                  long dur = md != null ? md.getLong(MediaMetadata.METADATA_KEY_DURATION) : 0;
+                                  long pos = st != null ? st.getPosition() : 0;
+                                  if (title != null && !title.isEmpty()) nowTitle = title;
+                                  if (stPlaying) { ytSawPlaying = true; ytQuietSince = 0; }
+                                  boolean wasPaused = radioPaused;
+                                  radioPaused = !stPlaying;
+                                  if (wasPaused != radioPaused) updateMusic();
+                              } catch (Exception ignored) { }
+                          }
+                          boolean musicOn = stPlaying;
+                          if (mc == null) {
+                              try { musicOn = ((AudioManager) getSystemService(AUDIO_SERVICE)).isMusicActive(); } catch (Exception ignored) { }
                           }
                           // Once SmartTube is playing, hop back to the island (needs "display over other apps")
                           if (returnPending) {
-                              if (resumed || System.currentTimeMillis() > returnDeadline) returnPending = false;
+                              if (resumed || now > returnDeadline) returnPending = false;
                               else {
-                                  boolean on = false;
-                                  try { on = ((AudioManager) getSystemService(AUDIO_SERVICE)).isMusicActive(); } catch (Exception ignored) { }
-                                  returnHits = on ? returnHits + 1 : 0;
+                                  returnHits = musicOn ? returnHits + 1 : 0;
                                   if (returnHits >= 2) {
                                       returnPending = false;
                                       runOnUiThread(() -> {
@@ -1209,15 +1315,10 @@ jobs:
                                   }
                               }
                           }
-                          if (!ytActive || radioPaused || !resumed) continue;
-                          long now = System.currentTimeMillis();
+                          // Without SmartTube's controls, guess from whether any music is playing
+                          if (mc != null || !ytActive || radioPaused || !resumed) continue;
                           if (now < ytGraceUntil) continue;
-                          boolean playing = false;
-                          try {
-                              AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-                              playing = am.isMusicActive();
-                          } catch (Exception ignored) { }
-                          if (playing) { ytQuietSince = 0; continue; }
+                          if (musicOn) { ytQuietSince = 0; continue; }
                           if (ytQuietSince == 0) ytQuietSince = now;
                           else if (now - ytQuietSince > 10000) {
                               radioPaused = true;
@@ -1694,10 +1795,16 @@ jobs:
                   rf.set(520, 120, 760, 300);
                   c.drawRoundRect(rf, 14, 14, w);
                   w.setColor(0xff90a4ae);
-                  for (int i = 0; i < 9; i++) {
-                      float sx = 530 + (i % 3) * 78, sy = 130 + (i / 3) * 55;
-                      rf.set(sx, sy, sx + 66, sy + 44);
-                      c.drawRoundRect(rf, 8, 8, w);
+                  // stones laid in staggered rows, same as the chimney above
+                  for (int row = 0; row < 6; row++) {
+                      float sy = 134 + row * 27;
+                      float off = (row % 2) * 30;
+                      for (float sx = 526 - off; sx < 754; sx += 60) {
+                          float l = Math.max(526, sx), r2 = Math.min(754, sx + 54);
+                          if (r2 - l < 10) continue;
+                          rf.set(l, sy, r2, Math.min(296, sy + 22));
+                          c.drawRoundRect(rf, 6, 6, w);
+                      }
                   }
                   w.setColor(0xff5d4037);
                   rf.set(500, 102, 780, 132);
@@ -2425,10 +2532,20 @@ jobs:
               void updateFire(float dt) {
                   fireHintT += dt;
                   // sparks
-                  if (rnd.nextFloat() < dt * 16) spark(640 + (rnd.nextFloat() - 0.5f) * 380, 560, false);
-                  if (rnd.nextFloat() < dt * 0.7f) {
+                  // A few stray sparks, then every so often a little burst of them
+                  if (rnd.nextFloat() < dt * 2.5f) spark(640 + (rnd.nextFloat() - 0.5f) * 380, 560, false);
+                  if (rnd.nextFloat() < dt * 0.55f) {
                       float x = 640 + (rnd.nextFloat() - 0.5f) * 300;
-                      for (int i = 0; i < 9; i++) spark(x, 570, true);
+                      int count = 5 + rnd.nextInt(12);
+                      for (int i = 0; i < count; i++) spark(x, 570, true);
+                  }
+                  // Soft dark smoke drifting up the chimney
+                  if (rnd.nextFloat() < dt * 3f) {
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 240, 400 + rnd.nextFloat() * 60, false);
+                      q.vx = (rnd.nextFloat() - 0.5f) * 20; q.vy = -45 - rnd.nextFloat() * 25;
+                      q.max = q.life = 4.5f; q.size = 14 + rnd.nextFloat() * 10; q.grow = 9f;
+                      q.color = 0xff1a1412;
+                      q.flue = true; q.flueX = 640; q.flueTop = 150;
                   }
                   // little flame wisps that break off
                   if (rnd.nextFloat() < dt * 3) {
@@ -2566,7 +2683,7 @@ jobs:
                   if (overlay == OV_FOLDER) {
                       if (folderClosing) return;
                       int n = discs.size();
-                      if (back) { closeFolder(null); return; }
+                      if (back) { closeFolder(nowDisc != null ? this::openPlayer : null); return; }
                       if (n == 0) return;
                       folderSel = Math.max(0, Math.min(n - 1, folderSel));
                       int page = folderSel / 8, slot = folderSel % 8;
@@ -2594,6 +2711,16 @@ jobs:
                   }
                   if (overlay == OV_PLAYER) {
                       if (back || menu) { overlay = OV_NONE; play(S_TICK, 0.4f, 0.8f); return; }
+                      // Down to the volume slider, up back to the buttons
+                      if (code == KeyEvent.KEYCODE_DPAD_DOWN && playerRow == 0) { playerRow = 1; play(S_TICK, 0.35f, 0.9f); return; }
+                      if (code == KeyEvent.KEYCODE_DPAD_UP && playerRow == 1) { playerRow = 0; play(S_TICK, 0.35f, 1.1f); return; }
+                      if (playerRow == 1) {
+                          if (code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_DPAD_LEFT) {
+                              setCdVolume(cdVolume + (code == KeyEvent.KEYCODE_DPAD_RIGHT ? 0.05f : -0.05f));
+                              play(S_TICK, 0.3f * cdVolume + 0.05f, 0.8f + cdVolume * 0.6f);
+                          }
+                          return;
+                      }
                       if (code == KeyEvent.KEYCODE_DPAD_RIGHT) { playerSel = (playerSel + 1) % PLAYER_BTNS.length; play(S_TICK, 0.35f, 1f); }
                       else if (code == KeyEvent.KEYCODE_DPAD_LEFT) { playerSel = (playerSel + PLAYER_BTNS.length - 1) % PLAYER_BTNS.length; play(S_TICK, 0.35f, 1f); }
                       else if (ok && !repeat) {
@@ -2886,9 +3013,20 @@ jobs:
                   play(S_WHOOSH, 0.3f, 1.1f);
               }
 
+              /**
+               * Volume for the CD player. MP3 discs are turned down inside Snow Island. YouTube discs play
+               * in SmartTube, which only lets Snow Island ask for a volume if SmartTube allows it.
+               */
+              void setCdVolume(float v) {
+                  cdVolume = Math.max(0, Math.min(1, Math.round(v * 20) / 20f));
+                  prefs.edit().putFloat("cdvol", cdVolume).apply();
+                  runOnUiThread(() -> { try { if (cdPlayer != null) cdPlayer.setVolume(cdVolume, cdVolume); } catch (Exception ignored) { } });
+              }
+
               void openPlayer() {
                   overlay = OV_PLAYER;
                   playerSel = 1;
+                  playerRow = 0;
                   pEmote = E_NONE;
                   play(S_TICK, 0.45f, 1.2f);
               }
@@ -3163,8 +3301,15 @@ jobs:
               }
 
               void drawParts(Canvas c, boolean world) {
+                  drawParts(c, world, 0);
+              }
+
+              /** mode 0: everything, 1: only smoke, 2: everything but smoke */
+              void drawParts(Canvas c, boolean world, int mode) {
                   for (Part q : parts) {
                       if (q.world != world) continue;
+                      if (mode == 1 && q.grow <= 0) continue;
+                      if (mode == 2 && q.grow > 0) continue;
                       int a = (int) (255 * Math.min(1, q.life / q.max * 1.5f));
                       if (q.grow > 0) a = (int) (a * 0.5f);     // smoke is see-through
                       int col = (a << 24) | (q.color & 0xffffff);
@@ -4082,6 +4227,9 @@ jobs:
                   c.drawRect(0, 0, VW, VH, p);
                   p.setShader(null);
 
+                  // smoke sits behind the flames
+                  drawParts(c, false, 1);
+
                   // glowing ember bed
                   for (int i = 0; i < emberX.length; i++) {
                       float g = 0.55f + 0.45f * (float) Math.sin(time * (2 + i % 5) + emberPh[i]);
@@ -4138,7 +4286,7 @@ jobs:
                       drawPumpkin(c, VW - 220, 58, 1);
                   }
 
-                  drawParts(c, false);
+                  drawParts(c, false, 2);
 
                   // overall flicker on the room
                   int dim = (int) (40 + flick * 18);
@@ -4432,8 +4580,8 @@ jobs:
               void drawPlayerPanel(Canvas c) {
                   c.drawColor(0x66000000);
                   Disc d = nowDisc;
-                  float w = 760, h = 250;
-                  float l = (VW - w) / 2, t = VH - h - 40;
+                  float w = 760, h = 300;
+                  float l = (VW - w) / 2, t = VH - h - 30;
                   rf.set(l, t, l + w, t + h);
                   p.setColor(0xf0161d29);
                   c.drawRoundRect(rf, 28, 28, p);
@@ -4462,7 +4610,7 @@ jobs:
                   float bx0 = tx + 20;
                   for (int i = 0; i < PLAYER_BTNS.length; i++) {
                       float bx = bx0 + i * gap;
-                      p.setColor(i == playerSel ? 0xff2e7dbd : 0xff263142);
+                      p.setColor(i == playerSel && playerRow == 0 ? 0xff2e7dbd : 0xff263142);
                       c.drawCircle(bx, by, 30, p);
                       tp.setTextAlign(Paint.Align.CENTER);
                       tp.setTextSize(i == playerSel ? 28 : 24);
@@ -4472,7 +4620,32 @@ jobs:
                   tp.setTextAlign(Paint.Align.CENTER);
                   tp.setTextSize(15);
                   tp.setColor(0xffffffff);
-                  c.drawText(PLAYER_BTN_NAMES[playerSel], bx0 + playerSel * gap, by + 52, tp);
+                  if (playerRow == 0) c.drawText(PLAYER_BTN_NAMES[playerSel], bx0 + playerSel * gap, by + 52, tp);
+
+                  // Volume slider
+                  float sy = t + h - 34, sl = tx + 40, sr = l + w - 60;
+                  tp.setTextAlign(Paint.Align.LEFT);
+                  tp.setTextSize(20);
+                  tp.setColor(playerRow == 1 ? 0xffffffff : 0xff90a4ae);
+                  c.drawText(cdVolume <= 0 ? "🔇" : cdVolume < 0.5f ? "🔉" : "🔊", tx - 6, sy + 7, tp);
+                  p.setColor(0xff263142);
+                  rf.set(sl, sy - 4, sr, sy + 4);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  p.setColor(playerRow == 1 ? 0xff2e7dbd : 0xff546e7a);
+                  rf.set(sl, sy - 4, sl + (sr - sl) * cdVolume, sy + 4);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  p.setColor(0xffffffff);
+                  c.drawCircle(sl + (sr - sl) * cdVolume, sy, playerRow == 1 ? 11 : 8, p);
+                  tp.setTextAlign(Paint.Align.RIGHT);
+                  tp.setTextSize(14);
+                  tp.setColor(0xff90a4ae);
+                  c.drawText(Math.round(cdVolume * 100) + "%", l + w - 18, sy + 5, tp);
+                  if (nowYT && playerRow == 1) {
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      tp.setTextSize(13);
+                      tp.setColor(0xffffcc80);
+                      c.drawText("This slider is for your MP3 discs. YouTube discs follow the TV volume.", (sl + sr) / 2, sy - 14, tp);
+                  }
                   tp.setTextAlign(Paint.Align.RIGHT);
                   tp.setTextSize(13);
                   tp.setColor(0xff90a4ae);
@@ -4707,62 +4880,61 @@ jobs:
               }
 
               /**
-               * Fireplace crackle, about 10 seconds, made to loop. No background rumble.
-               * Light, uneven little crackles (mostly one at a time), plus now and then a low,
-               * round pop with a soft thump, like a log settling.
+               * Fireplace crackle, about 10 seconds, made to loop. Small soft crackles whose busyness
+               * rises and falls in waves. No big cracks, no rumble, no pitched sounds.
                */
               static float[] crackle() {
-                  Random r = new Random(5150);
-                  int n = (int) (RATE * 10.0);
+                  Random r = new Random(9900);
+                  int n = RATE * 10;
                   float[] out = new float[n];
-                  // small crackles
                   double t = 0;
                   while (true) {
-                      t += -Math.log(1 - r.nextDouble()) / 3.5;
-                      if (t >= 10.0) break;
-                      double roll = r.nextDouble();
-                      int clicks = roll < 0.7 ? 1 : roll < 0.9 ? 2 : 3;
-                      double ct = t;
-                      for (int k = 0; k < clicks; k++) {
-                          ct += 0.02 + r.nextDouble() * 0.12;
-                          float amp = 0.05f + (float) Math.pow(r.nextFloat(), 3) * 0.28f;
-                          noiseClick(out, (int) (ct * RATE), amp, 0.0015 + r.nextDouble() * 0.0025, 900 + r.nextDouble() * 1300, 220, r);
-                      }
-                  }
-                  // low round pops: a few loud ones and a few softer ones
-                  for (int sn = 0; sn < 8; sn++) {
-                      boolean big = sn % 2 == 0;
-                      int at = (int) ((0.4 + sn * 1.2 + r.nextDouble() * 0.7) * RATE);
-                      float a = big ? 0.75f : 0.35f + r.nextFloat() * 0.15f;
-                      woodTap(out, at, 480 + r.nextDouble() * 320, 0.008 + r.nextDouble() * 0.003, a);
-                      int len = (int) (RATE * 0.03);
-                      for (int s = 0; s < len; s++) {
-                          float e = (float) Math.exp(-s / (RATE * 0.008));
-                          out[(at + s) % n] += (float) Math.sin(2 * Math.PI * (115 + 30 * r.nextDouble() * 0) * s / RATE) * e * 0.2f * a;
-                      }
-                      for (int k = 0; k < 2; k++) {
-                          noiseClick(out, at + (int) (RATE * (0.03 + r.nextDouble() * 0.2)), 0.12f * a / 0.75f, 0.002, 1400, 250, r);
-                      }
+                      double busy = 0.5 + 0.5 * Math.sin(t * 0.9) * Math.sin(t * 0.37 + 1);
+                      double rate = 1.5 + 8 * busy * busy;
+                      t += -Math.log(1 - r.nextDouble()) / rate;
+                      if (t >= 10) break;
+                      float amp = 0.15f + r.nextFloat() * 0.35f;
+                      softCrack(out, (int) (t * RATE), amp, 0.0008 + r.nextDouble() * 0.0015, 350, 1600 + r.nextDouble() * 1600, r);
                   }
                   normalize(out, 0.8f);
                   return out;
               }
 
-              /** A tiny burst of filtered noise that fades in a few milliseconds. */
-              static void noiseClick(float[] out, int at, float amp, double durSec, double lpHz, double hpHz, Random r) {
-                  int n = out.length, len = (int) (durSec * RATE * 5) + 8;
+              /** A soft crack: noise between two filters (lo..hi Hz), dying away in a millisecond or two. */
+              static void softCrack(float[] out, int at, float amp, double decaySec, double lo, double hi, Random r) {
+                  int n = out.length, len = (int) (decaySec * RATE * 6) + 6;
                   float[] tmp = new float[len];
                   float pk = 1e-9f;
-                  double alp = 1 - Math.exp(-2 * Math.PI * lpHz / RATE), ahp = 1 - Math.exp(-2 * Math.PI * hpHz / RATE);
-                  double l1 = 0, l2 = 0, hl = 0;
+                  double alp = 1 - Math.exp(-2 * Math.PI * hi / RATE), ahp = 1 - Math.exp(-2 * Math.PI * lo / RATE);
+                  double l1 = 0, l2 = 0, h = 0;
                   for (int s = 0; s < len; s++) {
-                      double e = Math.exp(-s / (durSec * RATE));
-                      if (s < 3) e *= (s + 1) / 3.0;
+                      double e = Math.exp(-s / (decaySec * RATE));
                       double x = (r.nextDouble() * 2 - 1) * e;
                       l1 += alp * (x - l1);
                       l2 += alp * (l1 - l2);
-                      hl += ahp * (l2 - hl);
-                      tmp[s] = (float) (l2 - hl);
+                      h += ahp * (l2 - h);
+                      tmp[s] = (float) (l2 - h);
+                      pk = Math.max(pk, Math.abs(tmp[s]));
+                  }
+                  float k = amp / pk;
+                  for (int s = 0; s < len; s++) out[(at + s) % n] += tmp[s] * k;
+              }
+
+              /** One tiny crack: a burst of wide-band noise that dies in about a millisecond. No pitch. */
+              static void crack(float[] out, int at, float amp, double decaySec, double centerHz, Random r) {
+                  int n = out.length, len = (int) (decaySec * RATE * 6) + 6;
+                  float[] tmp = new float[len];
+                  float pk = 1e-9f;
+                  double bw = centerHz * 1.2;
+                  double alp = 1 - Math.exp(-2 * Math.PI * (centerHz + bw / 2) / RATE);
+                  double ahp = 1 - Math.exp(-2 * Math.PI * Math.max(200, centerHz - bw / 2) / RATE);
+                  double l = 0, h = 0;
+                  for (int s = 0; s < len; s++) {
+                      double e = Math.exp(-s / (decaySec * RATE));
+                      double x = (r.nextDouble() * 2 - 1) * e;
+                      l += alp * (x - l);
+                      h += ahp * (l - h);
+                      tmp[s] = (float) (l - h);
                       pk = Math.max(pk, Math.abs(tmp[s]));
                   }
                   float k = amp / pk;
@@ -5069,6 +5241,19 @@ jobs:
                       con.disconnect();
                   }
               }
+          }
+          SNOW_EOF
+          cat > app/src/main/java/com/josh/snowisland/MediaListener.java <<'SNOW_EOF'
+          package com.josh.snowisland;
+
+          import android.service.notification.NotificationListenerService;
+
+          /**
+           * Does nothing by itself. Android only lets an app see other apps' "now playing" controls
+           * (SmartTube's play/pause state and song name) if it has one of these, switched on with:
+           *   adb shell cmd notification allow_listener com.josh.snowisland/com.josh.snowisland.MediaListener
+           */
+          public class MediaListener extends NotificationListenerService {
           }
           SNOW_EOF
 
