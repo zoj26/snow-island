@@ -278,6 +278,8 @@ jobs:
 
               // The CD player sits on a little ice table in front of the igloo
               static final float CD_X = IGLOO_X - 258, CD_Y = IGLOO_Y + 18;
+              // Ezio's bed, off to the side of the lawn chairs
+              static final float BED_X = IGLOO_X + 310, BED_Y = IGLOO_Y + 140;
 
               // YouTube playlists that come with the island. To add one: {"Name", "playlist id", "colour"}
               static final String[][] YT_DISCS = {
@@ -288,8 +290,8 @@ jobs:
               static final float[] CLOCK_SIZES = {1f, 0.85f, 0.75f, 0.6f};
               static final String[] CLOCK_SIZE_NAMES = {"Full", "85%", "75%", "60%"};
               static final int[] MIX_COLS = {0xff1e88e5, 0xff8e24aa, 0xff43a047, 0xfffb8c00, 0xff00acc1, 0xffd81b60, 0xff5e35b1, 0xfffdd835};
-              static final String[] PLAYER_BTNS = {"⏮", "⏯", "⏭", "💿", "🔍", "⏹"};
-              static final String[] PLAYER_BTN_NAMES = {"Previous song", "Play / pause", "Next song", "CD folder", "Song list", "Stop"};
+              static final String[] PLAYER_BTNS = {"⏮", "⏯", "⏭", "🔀", "💿", "🔍", "⏹"};
+              static final String[] PLAYER_BTN_NAMES = {"Previous song", "Play / pause", "Next song", "Shuffle", "CD folder", "Song list", "Stop"};
 
               static final int SEASON_NONE = 0, SEASON_XMAS = 1, SEASON_HALLOWEEN = 2, SEASON_VALENTINE = 3, SEASON_NEWYEAR = 4;
               static final String[] SEASON_PREF_NAMES = {"Auto", "Christmas", "Halloween", "Valentine's", "New Year", "Off"};
@@ -307,9 +309,9 @@ jobs:
               static final String[] CHAT_BITS = {"…", "♪", "♥", "?", "!", "★", "☺", "❄", "ha ha", "!!", "hm?", "♫", "ooh", "…!"};
               static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
 
-              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "💤", "🙈", "⚙️", "🎵"};
-              static final int WN = 9, W_MUSIC = 8;
-              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Belly slide", "Nap", "Apps", "Island settings", "Music"};
+              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "🙈", "⚙️", "🎵"};
+              static final int WN = 10, W_MUSIC = 9, W_REMOTE = 5, W_EZIO = 6;
+              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Belly slide", "CD remote", "Ezio", "Apps", "Island settings", "Music"};
 
               static class AppPeng {
                   String pkg, label;
@@ -350,7 +352,7 @@ jobs:
                   int color;
                   String glyph;
                   boolean world, flue;
-                  float flueX, flueTop, grow, drag, wander, seed;
+                  float flueX, flueTop, grow, drag, wander, seed, age;
               }
 
               /** One CD in the folder: either a YouTube playlist or a mix of songs copied onto the TV. */
@@ -417,6 +419,8 @@ jobs:
               final ArrayList<Integer> ytOrder = new ArrayList<>();
               int ytPos;
               float cdVolume = 1f;
+              boolean shuffleOn;
+              volatile boolean ytSawDiscSong, ytShuffleSent;
               int playerRow;
               volatile long returnDeadline;
               int returnHits;
@@ -430,6 +434,14 @@ jobs:
               float[] drX, drY, drS, drR;
               Bitmap iglooBmp;
               final Object iglooSpot = new Object();
+
+              // Ezio the cat. His position is in the coordinates of whichever scene he's in.
+              final Object ezSpot = new Object(), bedSpot = new Object();
+              boolean ezFollow, ezMoving, ezSleeping, ezVisiting;
+              int ezScene = SCENE_ISLAND, ezFacing = RIGHT;
+              float ezX = BED_X, ezY = BED_Y + 2, ezTX = BED_X, ezTY = BED_Y + 2;
+              float ezWait = 3, ezPhase, ezBlinkT, ezNextBlink = 3, ezSleepT, ezVisitT = -1, ezReturnT = -1, ezStayT, ezHappyT;
+              boolean ezGoBed, ezLeaving;
 
               // Scene + overlays
               int scene = SCENE_ISLAND, pendingScene = -1;
@@ -522,7 +534,9 @@ jobs:
                   autoReturn = prefs.getBoolean("autoreturn", true);
                   tagColour = prefs.getBoolean("tagcolour", false);
                   clockSize = prefs.getInt("clocksize", 2);
+                  ezFollow = prefs.getBoolean("ezfollow", false);
                   cdVolume = prefs.getFloat("cdvol", 1f);
+                  shuffleOn = prefs.getBoolean("shuffle", false);
                   hidden.addAll(prefs.getStringSet("hidden", new HashSet<String>()));
                   loadDiscs();
 
@@ -892,13 +906,15 @@ jobs:
                   ArrayList<String> q = new ArrayList<>();
                   for (String s : d.songs) if (dir != null && new File(dir, s).exists()) q.add(s);
                   if (q.isEmpty()) { toast(d.name + " has no songs on it yet"); return; }
-                  if (start >= 0 && start < d.songs.size()) {
-                      // Start from the chosen song, then carry on in order
-                      String first = d.songs.get(start);
-                      int at = q.indexOf(first);
-                      if (at > 0) { ArrayList<String> r = new ArrayList<>(q.subList(at, q.size())); r.addAll(q.subList(0, at)); q = r; }
-                  } else {
+                  String first = start >= 0 && start < d.songs.size() ? d.songs.get(start) : null;
+                  if (shuffleOn) {
+                      // Shuffled, with the chosen song (if any) first
                       Collections.shuffle(q, rnd);
+                      if (first != null && q.remove(first)) q.add(0, first);
+                  } else if (first != null) {
+                      // In order, starting from the chosen song
+                      int at = q.indexOf(first);
+                      if (at > 0) q = new ArrayList<>(q.subList(at, q.size()));
                   }
                   stopRadio();
                   final ArrayList<String> queue = q;
@@ -927,7 +943,11 @@ jobs:
                               .setUsage(AudioAttributes.USAGE_MEDIA)
                               .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
                       mp.setDataSource(new File(musicDir(), song).getAbsolutePath());
-                      mp.setOnCompletionListener(m -> { cdIndex++; startCdTrack(); });
+                      mp.setOnCompletionListener(m -> {
+                          // The disc ends after its last song
+                          if (cdIndex + 1 >= cdQueue.size()) { stopRadio(); toast("That's the end of the disc"); }
+                          else { cdIndex++; startCdTrack(); }
+                      });
                       mp.prepare();
                       mp.setVolume(cdVolume, cdVolume);
                       cdPlayer = mp;
@@ -939,6 +959,56 @@ jobs:
                       toast("Couldn't play " + prettySong(song));
                   }
                   updateMusic();
+              }
+
+              /** Shuffle on/off. MP3 discs reshuffle the songs still to come; YouTube discs ask SmartTube. */
+              void setShuffle(boolean on) {
+                  shuffleOn = on;
+                  prefs.edit().putBoolean("shuffle", on).apply();
+                  play(S_TOGGLE, 0.45f, on ? 1.15f : 0.85f);
+                  Disc d = nowDisc;
+                  if (d == null) return;
+                  if (nowYT) {
+                      sendShuffleToSmartTube(on);
+                  } else {
+                      runOnUiThread(() -> {
+                          if (cdIndex + 1 >= cdQueue.size()) return;
+                          ArrayList<String> rest = new ArrayList<>(cdQueue.subList(cdIndex + 1, cdQueue.size()));
+                          if (on) Collections.shuffle(rest, rnd);
+                          else Collections.sort(rest, (a, b) -> Integer.compare(d.songs.indexOf(a), d.songs.indexOf(b)));
+                          while (cdQueue.size() > cdIndex + 1) cdQueue.remove(cdQueue.size() - 1);
+                          cdQueue.addAll(rest);
+                      });
+                  }
+              }
+
+              void sendShuffleToSmartTube(boolean on) {
+                  MediaController mc = smartTubeSession();
+                  if (mc == null) return;
+                  try {
+                      // The standard "shuffle" request most Android media players understand
+                      Bundle b = new Bundle();
+                      b.putInt("android.support.v4.media.session.action.ARGUMENT_SHUFFLE_MODE", on ? 1 : 0);
+                      mc.getTransportControls().sendCustomAction("android.support.v4.media.session.action.SET_SHUFFLE_MODE", b);
+                  } catch (Exception ignored) { }
+              }
+
+              static String normTitle(String t) {
+                  return t == null ? "" : t.toLowerCase(Locale.US).replaceAll("[^a-z0-9]", "");
+              }
+
+              /** Is this title one of the disc's songs? */
+              static boolean onDisc(Disc d, String title) {
+                  ArrayList<String[]> tr = d.tracks;
+                  if (tr == null) return true;
+                  String n = normTitle(title);
+                  if (n.isEmpty()) return true;
+                  for (String[] t : tr) {
+                      String m = normTitle(t[1]);
+                      if (m.isEmpty()) continue;
+                      if (m.equals(n) || (n.length() > 6 && m.length() > 6 && (m.contains(n) || n.contains(m)))) return true;
+                  }
+                  return false;
               }
 
               void radioToggle() {
@@ -1076,13 +1146,28 @@ jobs:
                   ytQuietSince = 0;
                   ytGraceUntil = System.currentTimeMillis() + 30000;
                   nowTitle = title != null ? title : d.name;
+                  ytSawDiscSong = false;
+                  ytShuffleSent = false;
                   updateMusic();
+                  if (d.tracks == null) new Thread(() -> fetchTracks(d), "island-tracks").start();
                   int index = 1;
                   ArrayList<String[]> tr = d.tracks;
                   if (videoId != null && tr != null) for (int i = 0; i < tr.size(); i++) if (tr.get(i)[0].equals(videoId)) { index = i + 1; break; }
                   String url = videoId != null
                           ? "https://www.youtube.com/watch?v=" + videoId + "&list=" + d.list + "&index=" + index
                           : "https://www.youtube.com/playlist?list=" + d.list;
+                  // If SmartTube is still holding an old song, close that player first; otherwise it
+                  // ignores the new song list
+                  MediaController old = smartTubeSession();
+                  if (old != null) {
+                      try { old.getTransportControls().stop(); } catch (Exception ignored) { }
+                      new Thread(() -> {
+                          try { Thread.sleep(900); } catch (InterruptedException ignored) { }
+                          openInSmartTube(url);
+                          armReturn();
+                      }, "island-reopen").start();
+                      return;
+                  }
                   openInSmartTube(url);
                   armReturn();
               }
@@ -1317,6 +1402,19 @@ jobs:
                                   long dur = md != null ? md.getLong(MediaMetadata.METADATA_KEY_DURATION) : 0;
                                   long pos = st != null ? st.getPosition() : 0;
                                   if (title != null && !title.isEmpty()) nowTitle = title;
+                                  Disc cur = nowDisc;
+                                  if (cur != null && stPlaying && title != null && !title.isEmpty() && cur.tracks != null) {
+                                      if (onDisc(cur, title)) {
+                                          ytSawDiscSong = true;
+                                          if (shuffleOn && !ytShuffleSent) { ytShuffleSent = true; sendShuffleToSmartTube(true); }
+                                      } else if (ytSawDiscSong) {
+                                          // SmartTube ran past the last song into its own suggestions: the disc is over
+                                          try { mc.getTransportControls().stop(); } catch (Exception ignored) { }
+                                          stopRadio();
+                                          toast("That's the end of the disc");
+                                          continue;
+                                      }
+                                  }
                                   if (ytResumeAt > 0 && now >= ytResumeAt) {
                                       ytResumeAt = 0;
                                       if (!stPlaying && !ytUserPaused && state == PlaybackState.STATE_PAUSED) {
@@ -1406,6 +1504,9 @@ jobs:
                   new Thread(() -> {
                       PackageManager pm = getPackageManager();
                       LinkedHashMap<String, AppPeng> found = new LinkedHashMap<>();
+                      // Penguins we already have keep everything (position, mood, icon), so coming back is instant
+                      Map<String, AppPeng> known;
+                      synchronized (lock) { known = new HashMap<>(byPkg); }
                       String[] cats = {Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER};
                       for (String cat : cats) {
                           Intent q = new Intent(Intent.ACTION_MAIN);
@@ -1415,6 +1516,12 @@ jobs:
                           for (ResolveInfo ri : list) {
                               String pk = ri.activityInfo.packageName;
                               if (pk.equals(getPackageName()) || found.containsKey(pk)) continue;
+                              AppPeng old = known.get(pk);
+                              if (old != null) {
+                                  old.label = String.valueOf(ri.loadLabel(pm));
+                                  found.put(pk, old);
+                                  continue;
+                              }
                               AppPeng a = new AppPeng();
                               a.pkg = pk;
                               a.label = String.valueOf(ri.loadLabel(pm));
@@ -1481,7 +1588,9 @@ jobs:
                   byPkg.clear();
                   for (AppPeng a : allApps) {
                       byPkg.put(a.pkg, a);
-                      a.chatWith = null; a.chatTalking = false; a.speaking = false; a.arrived = false; a.bubble = null;
+                      if (a.chatWith != null && !vis.contains(a.chatWith)) {
+                          a.chatWith = null; a.chatTalking = false; a.speaking = false; a.arrived = false; a.bubble = null;
+                      }
                   }
                   apps = vis;
 
@@ -2220,6 +2329,7 @@ jobs:
                       lastNearKey = nk;
                   }
 
+                  updateEzio(dt);
                   updateParticles(dt);
               }
 
@@ -2578,11 +2688,11 @@ jobs:
                       int count = 6 + rnd.nextInt(12);
                       for (int i = 0; i < count; i++) spark(x, 575, true);
                   }
-                  // A little faint smoke, curling like a ribbon up the flue
-                  if (rnd.nextFloat() < dt * 1.1f) {
-                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 160, 360 + rnd.nextFloat() * 40, false);
-                      q.vx = (rnd.nextFloat() - 0.5f) * 14; q.vy = -38 - rnd.nextFloat() * 18;
-                      q.max = q.life = 4f; q.size = 10 + rnd.nextFloat() * 6; q.grow = 3.5f;
+                  // A thin haze of smoke: starts hidden behind the flames, fades in, drifts up the flue
+                  if (rnd.nextFloat() < dt * 2.6f) {
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 180, 520 + rnd.nextFloat() * 50, false);
+                      q.vx = (rnd.nextFloat() - 0.5f) * 12; q.vy = -46 - rnd.nextFloat() * 16;
+                      q.max = q.life = 6.5f; q.size = 16 + rnd.nextFloat() * 8; q.grow = 7f;
                       q.color = 0xff2b2522;
                       q.seed = rnd.nextFloat() * 6.28f;
                       q.flue = true; q.flueX = 640; q.flueTop = 205;
@@ -2695,9 +2805,11 @@ jobs:
               /** Non-penguin things you can use: the igloo door outside, furniture inside. */
               String nearObject() {
                   if (scene == SCENE_ISLAND) {
+                      if (ezScene == SCENE_ISLAND && !ezFollow && dist2(px, py, ezX, ezY) < 60 * 60) return "ezio";
                       if (dist2(px, py, CD_X, CD_Y) < 70 * 70) return "cd";
                       return dist2(px, py, DOOR_X, DOOR_Y + 20) < 70 * 70 ? "door" : null;
                   }
+                  if (ezScene == SCENE_IGLOO && !ezFollow && dist2(px, py, ezX, ezY) < 60 * 60) return "ezio";
                   if (py > 615 && Math.abs(px - 640) < 110) return "exit";
                   if (px < 400 && py < 520) return "tv";
                   if (px > 880 && py < 520) return "shelf";
@@ -2793,9 +2905,10 @@ jobs:
                               case 0: radioSkip(-1); break;
                               case 1: radioToggle(); break;
                               case 2: radioSkip(1); break;
-                              case 3: overlay = OV_NONE; openFolder(); break;
-                              case 4: if (nowDisc != null) openSongList(nowDisc, () -> { overlay = OV_PLAYER; }); break;
-                              case 5: stopRadio(); overlay = OV_NONE; play(S_TOGGLE, 0.45f, 0.7f); break;
+                              case 3: setShuffle(!shuffleOn); break;
+                              case 4: overlay = OV_NONE; openFolder(); break;
+                              case 5: if (nowDisc != null) openSongList(nowDisc, () -> { overlay = OV_PLAYER; }); break;
+                              case 6: stopRadio(); overlay = OV_NONE; play(S_TOGGLE, 0.45f, 0.7f); break;
                           }
                           if (nowDisc == null && overlay == OV_PLAYER) overlay = OV_NONE;
                       }
@@ -2851,7 +2964,7 @@ jobs:
                       }
                       String o = nearObject();
                       if (o != null) { useObject(o); return; }
-                      openWheel();
+                      // OK in open space does nothing; the (i) / Info button opens the wheel
                   }
               }
 
@@ -2868,10 +2981,14 @@ jobs:
                       case 2: doHug(); break;
                       case 3: doSnowball(); break;
                       case 4: startEmote(E_SLIDE, 1.1f); break;
-                      case 5: nextZ = 0.4f; startEmote(E_NAP, 0); break;
-                      case 6: openAppsList(null); break;
-                      case 7: openSettings(); break;
-                      case 8: setMusic(!musicOn); break;
+                      case 5:
+                          if (nowDisc != null) openPlayer();
+                          else toast("No disc playing. Walk over to the boombox to put one on.");
+                          break;
+                      case 6: toggleEzio(); break;
+                      case 7: openAppsList(null); break;
+                      case 8: openSettings(); break;
+                      case 9: setMusic(!musicOn); break;
                   }
               }
 
@@ -2944,6 +3061,7 @@ jobs:
                       case "tv": play(S_OPEN, 0.5f, 0.9f); startIntent(new Intent(Settings.ACTION_SETTINGS), "Settings"); break;
                       case "shelf": openSettings(); break;
                       case "fire": play(S_DOOR, 0.3f, 1.3f); goScene(SCENE_FIRE); break;
+                      case "ezio": petEzio(); break;
                       case "cd":
                           facing = faceToward(px, py, CD_X, CD_Y);
                           if (nowDisc != null) openPlayer(); else openFolder();
@@ -2977,8 +3095,327 @@ jobs:
                   } else {
                       px = DOOR_X; py = DOOR_Y + 40; facing = DOWN;
                   }
+                  int from = scene;
                   scene = s;
                   lastNearKey = "";
+                  ezioSceneChange(from, s);
+              }
+
+              // ================================================================== Ezio the cat
+
+              /** The scene Ezio cares about: the fullscreen fire counts as being inside the igloo. */
+              int ezPlayerScene() {
+                  return scene == SCENE_FIRE ? SCENE_IGLOO : scene;
+              }
+
+              void ezioSceneChange(int from, int to) {
+                  int pf = from == SCENE_FIRE ? SCENE_IGLOO : from, pt = to == SCENE_FIRE ? SCENE_IGLOO : to;
+                  if (pf == pt) return;
+                  if (ezFollow) {
+                      // He comes along, right behind you
+                      ezScene = pt;
+                      if (pt == SCENE_IGLOO) { ezX = 600; ezY = 660; } else { ezX = DOOR_X - 40; ezY = DOOR_Y + 60; }
+                      ezTX = ezX; ezTY = ezY;
+                      ezSleeping = false;
+                      return;
+                  }
+                  if (pt == SCENE_IGLOO && ezScene == SCENE_ISLAND) {
+                      // Maybe he'll wander in after a while
+                      ezVisitT = rnd.nextFloat() < 0.5f ? 15 + rnd.nextFloat() * 30 : -1;
+                  } else if (pt == SCENE_ISLAND && ezScene == SCENE_IGLOO) {
+                      // He stays by the fire for a bit, then comes back out
+                      ezReturnT = 10 + rnd.nextFloat() * 20;
+                  }
+              }
+
+              void toggleEzio() {
+                  ezFollow = !ezFollow;
+                  prefs.edit().putBoolean("ezfollow", ezFollow).apply();
+                  int ps = ezPlayerScene();
+                  if (ezFollow) {
+                      if (ezScene != ps) {
+                          // He trots in from nearby
+                          ezScene = ps;
+                          if (ps == SCENE_IGLOO) { ezX = 640; ezY = 700; }
+                          else { ezX = px + (rnd.nextBoolean() ? 380 : -380); ezY = py + 60; }
+                      }
+                      ezSleeping = false;
+                      ezLeaving = false;
+                      ezVisiting = false;
+                      ezHappyT = 1.2f;
+                      play(S_CHIRP, 0.22f, 0.62f);
+                      toast("Ezio is following you");
+                  } else {
+                      ezWait = 1.5f;
+                      if (ezScene == SCENE_IGLOO) { ezVisiting = true; ezStayT = 60 + rnd.nextFloat() * 60; }
+                      play(S_CHIRP, 0.15f, 0.55f);
+                      toast("Ezio wanders off to do cat things");
+                  }
+              }
+
+              void petEzio() {
+                  ezSleeping = false;
+                  ezHappyT = 1.6f;
+                  ezFacing = px < ezX ? LEFT : RIGHT;
+                  ezWait = 3;
+                  play(S_CHIRP, 0.2f, 0.6f);
+                  for (int i = 0; i < 4; i++) spawnHeart(ezX + (rnd.nextFloat() - 0.5f) * 20, ezY - 40);
+              }
+
+              void updateEzio(float dt) {
+                  int ps = ezPlayerScene();
+                  ezPhase += dt * (ezMoving ? 13f : 2f);
+                  ezHappyT = Math.max(0, ezHappyT - dt);
+                  ezNextBlink -= dt;
+                  if (ezNextBlink <= 0) { ezBlinkT = 0.15f; ezNextBlink = 2.5f + rnd.nextFloat() * 4; }
+                  ezBlinkT = Math.max(0, ezBlinkT - dt);
+
+                  if (ezScene != ps) {
+                      // Off-screen: he might show up in your scene
+                      if (ps == SCENE_IGLOO && ezVisitT > 0) {
+                          ezVisitT -= dt;
+                          if (ezVisitT <= 0) {
+                              ezScene = SCENE_IGLOO; ezX = 640; ezY = 705;
+                              ezVisiting = true; ezLeaving = false; ezSleeping = false;
+                              ezStayT = 45 + rnd.nextFloat() * 55;
+                              ezTX = 560 + rnd.nextFloat() * 160; ezTY = 470 + rnd.nextFloat() * 40;
+                              ezWait = 0;
+                          }
+                      } else if (ps == SCENE_ISLAND && ezReturnT > 0) {
+                          ezReturnT -= dt;
+                          if (ezReturnT <= 0) {
+                              ezScene = SCENE_ISLAND; ezX = DOOR_X; ezY = DOOR_Y + 40;
+                              ezVisiting = false; ezLeaving = false; ezSleeping = false;
+                              ezWait = 0; ezTX = ezX + 80; ezTY = ezY + 60;
+                          }
+                      }
+                      ezMoving = false;
+                      return;
+                  }
+
+                  boolean inside = ezScene == SCENE_IGLOO;
+                  ezMoving = false;
+                  if (ezFollow) {
+                      ezSleeping = false;
+                      float behind = facing == LEFT ? 55 : facing == RIGHT ? -55 : (ezX < px ? -45 : 45);
+                      float tx = px + behind, ty = py + (facing == UP ? 40 : 8);
+                      float dx = tx - ezX, dy = ty - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
+                      if (d > 28) {
+                          float sp = d > 300 ? 340 : d > 120 ? 250 : 170;
+                          ezStep(dx / d, dy / d, Math.min(d, sp * dt), inside);
+                      } else if (rnd.nextFloat() < dt * 0.3f) {
+                          ezFacing = px < ezX ? LEFT : RIGHT;
+                      }
+                      return;
+                  }
+                  if (inside && ezVisiting) {
+                      ezStayT -= dt;
+                      if (ezStayT <= 0 && !ezLeaving) {
+                          ezLeaving = true; ezSleeping = false;
+                          ezTX = 640; ezTY = 700; ezWait = 0;
+                      }
+                  }
+                  if (ezSleeping) {
+                      ezSleepT -= dt;
+                      if (ezSleepT <= 0) { ezSleeping = false; ezWait = 1 + rnd.nextFloat() * 2; }
+                      return;
+                  }
+                  if (ezWait > 0) { ezWait -= dt; return; }
+                  float dx = ezTX - ezX, dy = ezTY - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
+                  if (d > 3) {
+                      ezStep(dx / d, dy / d, Math.min(d, 95 * dt), inside);
+                      return;
+                  }
+                  // Arrived somewhere
+                  if (inside && ezLeaving) {
+                      // Out the door he goes
+                      ezScene = SCENE_ISLAND; ezX = DOOR_X; ezY = DOOR_Y + 40;
+                      ezLeaving = false; ezVisiting = false;
+                      ezTX = ezX + 60; ezTY = ezY + 70; ezWait = 0;
+                      return;
+                  }
+                  if (ezGoBed || (inside && rnd.nextFloat() < 0.5f)) {
+                      ezGoBed = false;
+                      ezSleeping = true;
+                      ezSleepT = inside ? 25 + rnd.nextFloat() * 30 : 12 + rnd.nextFloat() * 20;
+                      return;
+                  }
+                  ezWait = 2 + rnd.nextFloat() * 4;
+                  if (inside) {
+                      ezTX = 520 + rnd.nextFloat() * 240; ezTY = 460 + rnd.nextFloat() * 70;
+                  } else if (rnd.nextFloat() < 0.3f) {
+                      ezGoBed = true; ezTX = BED_X; ezTY = BED_Y + 2;
+                  } else {
+                      double a = rnd.nextDouble() * Math.PI * 2;
+                      float r = 60 + rnd.nextFloat() * 170;
+                      ezTX = BED_X + (float) Math.cos(a) * r; ezTY = BED_Y + (float) Math.sin(a) * r * 0.6f;
+                  }
+              }
+
+              /** One step for Ezio, kept on the island (and off the igloo and boombox) or inside the room. */
+              void ezStep(float ux, float uy, float len, boolean inside) {
+                  float nx = ezX + ux * len, ny = ezY + uy * len;
+                  if (inside) {
+                      nx = Math.max(170, Math.min(1110, nx));
+                      ny = Math.max(400, Math.min(705, ny));
+                  } else {
+                      float ex = (nx - CX) / (RX - 45), ey = (ny - CY) / (RY - 40);
+                      float e = ex * ex + ey * ey;
+                      if (e > 1) { float k = (float) (1 / Math.sqrt(e)); nx = CX + (nx - CX) * k; ny = CY + (ny - CY) * k; }
+                      float ix = (nx - IGLOO_X) / 136f, iy = (ny - (IGLOO_Y - 22)) / 36f;
+                      float ie = ix * ix + iy * iy;
+                      if (ie < 1) { float k = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f))); nx = IGLOO_X + (nx - IGLOO_X) * k; ny = (IGLOO_Y - 22) + (ny - (IGLOO_Y - 22)) * k; }
+                  }
+                  if (Math.abs(ux) > 0.2f) ezFacing = ux < 0 ? LEFT : RIGHT;
+                  ezX = nx; ezY = ny;
+                  ezMoving = true;
+              }
+
+              /**
+               * Ezio: a round, fluffy black cat with a little head, stubby legs, a big fluffy tail and big
+               * derpy eyes. At Christmas he's wrapped in lights with a star on his head.
+               */
+              void drawEzio(Canvas c, float x, float y, float s, int face, boolean moving, boolean sleeping, float phase, boolean blink, int season) {
+                  final int FUR = 0xff16141b, FUR2 = 0xff24212b;
+                  c.save();
+                  c.translate(x, y);
+                  c.scale(face == LEFT ? -s : s, s);
+                  p.setColor(0x30000000);
+                  c.drawOval(-22, -5, 22, 5, p);
+                  float bob = moving ? (float) Math.abs(Math.sin(phase)) * 2.5f : (float) Math.sin(phase * 0.6f) * 0.8f;
+                  if (sleeping) {
+                      // curled-up loaf with the tail wrapped round
+                      p.setColor(FUR);
+                      c.drawOval(-20, -20, 20, 0, p);
+                      for (int i = 0; i < 10; i++) {
+                          double a = Math.PI + Math.PI * i / 9.0;
+                          c.drawCircle((float) Math.cos(a) * 19, -10 + (float) Math.sin(a) * 9, 4.2f, p);
+                      }
+                      c.drawOval(-24, -9, 8, 2, p);
+                      c.drawCircle(12, -13, 9, p);
+                      path.reset();
+                      path.moveTo(6, -19); path.lineTo(9, -27); path.lineTo(13, -20); path.close();
+                      path.moveTo(13, -20); path.lineTo(18, -27); path.lineTo(20, -17); path.close();
+                      c.drawPath(path, p);
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(1.6f);
+                      p.setColor(0xfff2f2f2);
+                      c.drawLine(9, -13, 13, -13, p);
+                      c.drawLine(15, -13, 19, -13, p);
+                      p.setStyle(Paint.Style.FILL);
+                      if (season == SEASON_XMAS) ezLights(c, true);
+                      c.restore();
+                      if (rnd.nextFloat() < 0.012f) spawnZ(x + 10, y - 30);
+                      return;
+                  }
+                  c.translate(0, -bob);
+                  // fluffy tail curling up behind
+                  float sway = (float) Math.sin(phase * (moving ? 0.6f : 0.35f)) * 6;
+                  p.setColor(FUR);
+                  for (int i = 0; i < 9; i++) {
+                      float t = i / 8f;
+                      float tx = -16 - t * 12 + (float) Math.sin(t * 3) * 4, ty = -12 - t * 26;
+                      c.drawCircle(tx + sway * t, ty, 5 + t * 3.5f, p);
+                  }
+                  // stubby legs
+                  float lift = moving ? (float) Math.sin(phase) * 2.5f : 0;
+                  p.setColor(FUR);
+                  rf.set(-13, -9 - Math.max(0, lift), -6, 1 - Math.max(0, lift)); c.drawRoundRect(rf, 3, 3, p);
+                  rf.set(6, -9 - Math.max(0, -lift), 13, 1 - Math.max(0, -lift)); c.drawRoundRect(rf, 3, 3, p);
+                  p.setColor(FUR2);
+                  rf.set(-4, -9 - Math.max(0, -lift), 3, 0 - Math.max(0, -lift)); c.drawRoundRect(rf, 3, 3, p);
+                  // round fluffy body
+                  p.setColor(FUR);
+                  c.drawCircle(0, -20, 16, p);
+                  for (int i = 0; i < 14; i++) {
+                      double a = Math.PI * 2 * i / 14.0;
+                      float j = (i % 3) * 0.8f;
+                      c.drawCircle((float) Math.cos(a) * (15 + j), -20 + (float) Math.sin(a) * (15 + j), 3.6f, p);
+                  }
+                  // small head on top, a bit forward
+                  float hx = 6, hy = -38;
+                  c.drawCircle(hx, hy, 10, p);
+                  for (int i = 0; i < 8; i++) {
+                      double a = Math.PI * 2 * i / 8.0;
+                      c.drawCircle(hx + (float) Math.cos(a) * 9.5f, hy + (float) Math.sin(a) * 9.5f, 2.6f, p);
+                  }
+                  path.reset();
+                  path.moveTo(hx - 9, hy - 4); path.lineTo(hx - 7, hy - 17); path.lineTo(hx - 1, hy - 8); path.close();
+                  path.moveTo(hx + 2, hy - 8); path.lineTo(hx + 9, hy - 17); path.lineTo(hx + 10, hy - 3); path.close();
+                  c.drawPath(path, p);
+                  p.setColor(0xffd88a9a);
+                  path.reset();
+                  path.moveTo(hx - 7.5f, hy - 6); path.lineTo(hx - 6.5f, hy - 13); path.lineTo(hx - 3, hy - 8); path.close();
+                  path.moveTo(hx + 4, hy - 8); path.lineTo(hx + 8, hy - 13); path.lineTo(hx + 8.5f, hy - 5); path.close();
+                  c.drawPath(path, p);
+                  // big derpy eyes
+                  if (blink) {
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(1.6f);
+                      p.setColor(0xfff2f2f2);
+                      c.drawLine(hx - 7, hy, hx - 1, hy, p);
+                      c.drawLine(hx + 2, hy, hx + 8, hy, p);
+                      p.setStyle(Paint.Style.FILL);
+                  } else {
+                      p.setColor(0xffffffff);
+                      c.drawCircle(hx - 4, hy, 4.4f, p);
+                      c.drawCircle(hx + 5, hy, 4.4f, p);
+                      p.setColor(0xff111111);
+                      c.drawCircle(hx - 3.2f, hy + 0.6f, 1.9f, p);
+                      c.drawCircle(hx + 5.6f, hy - 0.2f, 1.9f, p);
+                  }
+                  // whiskers
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(0.8f);
+                  p.setColor(0x88ffffff);
+                  c.drawLine(hx + 8, hy + 4, hx + 16, hy + 2, p);
+                  c.drawLine(hx + 8, hy + 5, hx + 16, hy + 6, p);
+                  c.drawLine(hx - 6, hy + 4, hx - 14, hy + 2, p);
+                  p.setStyle(Paint.Style.FILL);
+                  if (season == SEASON_XMAS) {
+                      ezLights(c, false);
+                      p.setColor(0xffe53935);
+                      drawStar(c, hx, hy - 16, 6);
+                  }
+                  c.restore();
+                  if (ezHappyT > 0 && rnd.nextFloat() < 0.15f) spawnHeart(x, y - 52 * s);
+              }
+
+              /** A string of twinkling Christmas lights wrapped around Ezio. */
+              void ezLights(Canvas c, boolean loaf) {
+                  float[][] spots = loaf
+                          ? new float[][]{{-14, -8}, {-6, -14}, {3, -9}, {-10, -2}, {12, -6}}
+                          : new float[][]{{-11, -26}, {-3, -31}, {7, -27}, {12, -20}, {-13, -14}, {-4, -10}, {6, -12}};
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(0.9f);
+                  p.setColor(0xff3a3a3a);
+                  path.reset();
+                  for (int i = 0; i < spots.length; i++) {
+                      if (i == 0) path.moveTo(spots[i][0], spots[i][1]); else path.lineTo(spots[i][0], spots[i][1]);
+                  }
+                  c.drawPath(path, p);
+                  p.setStyle(Paint.Style.FILL);
+                  for (int i = 0; i < spots.length; i++) {
+                      int col = LIGHT_COLS[i % LIGHT_COLS.length];
+                      boolean on = ((int) (time * 2.2f) + i) % 3 != 0;
+                      p.setColor(on ? col : blend(col, 0xff000000, 0.5f));
+                      c.drawCircle(spots[i][0], spots[i][1], 2.4f, p);
+                  }
+              }
+
+              /** Ezio's little round bed. */
+              void drawEzioBed(Canvas c) {
+                  float x = BED_X, y = BED_Y;
+                  p.setColor(0x30000000);
+                  c.drawOval(x - 34, y - 8, x + 34, y + 10, p);
+                  p.setColor(0xff8e3b46);
+                  c.drawOval(x - 32, y - 16, x + 32, y + 6, p);
+                  p.setColor(0xffb24a57);
+                  c.drawOval(x - 32, y - 20, x + 32, y + 1, p);
+                  p.setColor(0xfff1e3d3);
+                  c.drawOval(x - 22, y - 15, x + 22, y - 2, p);
+                  p.setColor(0xffe2d0bc);
+                  c.drawOval(x - 14, y - 12, x + 14, y - 4, p);
               }
 
               void setMusic(boolean on) {
@@ -3107,7 +3544,7 @@ jobs:
                   listTitle = d.name;
                   listOnBack = () -> { overlay = OV_FOLDER; folderAnim = 1; };
                   listItems.clear();
-                  listItems.add(new Item("Play from a random song", "", null, () -> { overlay = OV_NONE; playDisc(d, -1); }));
+                  listItems.add(new Item("Play this disc", "", null, () -> { overlay = OV_NONE; playDisc(d, -1); }));
                   listItems.add(new Item("🔍  Song list", "›", null, () -> openSongList(d, () -> openDiscMenu(d))));
                   if (!d.yt) {
                       listItems.add(new Item("Rename this disc", "", null, () -> {
@@ -3355,6 +3792,7 @@ jobs:
                   for (Iterator<Part> it = parts.iterator(); it.hasNext(); ) {
                       Part q = it.next();
                       q.life -= dt;
+                      q.age += dt;
                       if (q.life <= 0) { it.remove(); continue; }
                       q.vy += q.g * dt;
                       if (q.flue) {
@@ -3386,12 +3824,14 @@ jobs:
                       if (q.grow > 0) a = (int) (a * 0.5f);     // smoke is see-through
                       int col = (a << 24) | (q.color & 0xffffff);
                       if (!q.world && q.grow > 0) {
-                          // fireplace smoke: a faint swaying ribbon, not a ball
-                          c.save();
-                          c.rotate((float) Math.sin(time * 1.5f + q.seed) * 18, q.x, q.y);
-                          p.setColor(((int) (a * 0.35f) << 24) | (q.color & 0xffffff));
-                          c.drawOval(q.x - q.size * 0.45f, q.y - q.size * 1.8f, q.x + q.size * 0.45f, q.y + q.size * 1.8f, p);
-                          c.restore();
+                          // fireplace smoke: big soft puffs, so faint they blend into one drifting haze
+                          float fadeIn = Math.min(1, q.age / 1.5f);
+                          int sa = (int) (a * 0.22f * fadeIn);
+                          float sx = q.x + (float) Math.sin(time * 0.9f + q.seed) * 10;
+                          p.setColor((sa << 24) | (q.color & 0xffffff));
+                          c.drawCircle(sx, q.y, q.size, p);
+                          p.setColor(((sa / 2) << 24) | (q.color & 0xffffff));
+                          c.drawCircle(sx, q.y, q.size * 1.45f, p);
                           continue;
                       }
                       if (q.glyph != null) {
@@ -3474,6 +3914,8 @@ jobs:
                   drawList.addAll(chs);
                   drawList.add(cdSpot);
                   drawList.add(iglooSpot);
+                  drawList.add(bedSpot);
+                  if (ezScene == SCENE_ISLAND) drawList.add(ezSpot);
                   drawList.add(this);
                   Collections.sort(drawList, (a, b) -> Float.compare(yOf(a), yOf(b)));
                   boolean xmas = season == SEASON_XMAS;
@@ -3482,6 +3924,10 @@ jobs:
                           drawPlayer(c);
                       } else if (o == cdSpot) {
                           drawCdPlayer(c);
+                      } else if (o == bedSpot) {
+                          drawEzioBed(c);
+                      } else if (o == ezSpot) {
+                          drawEzio(c, ezX, ezY, 1f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0, season);
                       } else if (o == iglooSpot) {
                           c.drawBitmap(iglooBmp, IGLOO_X - 160, IGLOO_Y - 150, null);
                           if (xmas) drawIglooLights(c, night);
@@ -3554,7 +4000,7 @@ jobs:
                       else {
                           String o = nearObject();
                           if (o != null) msg = objectLabel(o);
-                          else if (time < 10) msg = "Arrows to waddle  ·  OK on a penguin opens it  ·  OK anywhere else opens the wheel";
+                          else if (time < 10) msg = "Arrows to waddle  ·  OK on a penguin opens it  ·  (i) opens the wheel";
                       }
                   }
                   drawHud(c, msg);
@@ -3683,6 +4129,8 @@ jobs:
                   if (o == this) return py;
                   if (o == cdSpot) return CD_Y;
                   if (o == iglooSpot) return IGLOO_Y - 12;
+                  if (o == ezSpot) return ezY;
+                  if (o == bedSpot) return BED_Y - 6;
                   if (o instanceof Chair) return ((Chair) o).y;
                   return ((AppPeng) o).y;
               }
@@ -3737,8 +4185,11 @@ jobs:
                       drawPumpkin(c, 735, 103, 1);
                   }
 
-                  // Player (and a cozy chirp when sitting)
+                  // Player (and a cozy chirp when sitting), with Ezio in front or behind depending on who's lower
+                  boolean ezHere = ezScene == SCENE_IGLOO;
+                  if (ezHere && ezY < py) drawEzio(c, ezX, ezY, 1.15f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0, season);
                   drawPlayer(c);
+                  if (ezHere && ezY >= py) drawEzio(c, ezX, ezY, 1.15f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0, season);
                   drawParts(c, true);
                   if (overlay == OV_NONE && "exit".equals(nearObject())) drawNameTag(c, 640, 712, "Outside");
 
@@ -4386,6 +4837,9 @@ jobs:
                   drawParts(c, false, 2);
                   c.restore();
 
+                  // Ezio, if he's inside, lounging on the hearth
+                  if (ezScene == SCENE_IGLOO) drawEzio(c, 960, 714, 2.4f, LEFT, false, !ezFollow, ezPhase, ezBlinkT > 0, season);
+
                   // overall flicker on the room
                   int dim = (int) (40 + flick * 18);
                   c.drawColor(Math.max(0, dim) << 24);
@@ -4718,7 +5172,7 @@ jobs:
                   tp.setColor(playing ? 0xffa5d6a7 : 0xffffcc80);
                   c.drawText((playing ? "Playing" : "Paused") + (nowYT ? " in SmartTube" : ""), tx, t + 114, tp);
 
-                  float by = t + 172, gap = 82;
+                  float by = t + 172, gap = 70;
                   float bx0 = tx + 20;
                   for (int i = 0; i < PLAYER_BTNS.length; i++) {
                       float bx = bx0 + i * gap;
@@ -4728,6 +5182,10 @@ jobs:
                       tp.setTextSize(i == playerSel ? 28 : 24);
                       tp.setColor(0xffffffff);
                       c.drawText(PLAYER_BTNS[i], bx, by + 9, tp);
+                      if (i == 3 && shuffleOn) {
+                          p.setColor(0xff76ff03);
+                          c.drawCircle(bx, by + 24, 3.5f, p);
+                      }
                   }
                   tp.setTextAlign(Paint.Align.CENTER);
                   tp.setTextSize(15);
@@ -4801,12 +5259,15 @@ jobs:
                       c.drawText(WHEEL_ICONS[i], ix, iy + 8, tp);
                       tp.setTextSize(14);
                       tp.setColor(i == wheelSel ? 0xffffffff : 0xffb0bec5);
-                      String nm = i == W_MUSIC ? (musicOn ? "Music: on" : "Music: off") : WHEEL_NAMES[i];
+                      String nm = i == W_MUSIC ? (musicOn ? "Music: on" : "Music: off")
+                              : i == W_EZIO ? (ezFollow ? "Ezio: following" : "Call Ezio") : WHEEL_NAMES[i];
                       c.drawText(nm, ix, iy + 34, tp);
                   }
                   tp.setColor(0xffffffff);
                   tp.setTextSize(20);
-                  String nm = wheelSel == W_MUSIC ? (musicOn ? "Turn music off" : "Turn music on") : WHEEL_NAMES[wheelSel];
+                  String nm = wheelSel == W_MUSIC ? (musicOn ? "Turn music off" : "Turn music on")
+                          : wheelSel == W_EZIO ? (ezFollow ? "Let Ezio roam" : "Call Ezio over")
+                          : wheelSel == W_REMOTE ? (nowDisc != null ? "CD remote" : "CD remote (no disc)") : WHEEL_NAMES[wheelSel];
                   c.drawText(nm, cx, cy + 6, tp);
                   tp.setTextSize(13);
                   tp.setColor(0xff90a4ae);
