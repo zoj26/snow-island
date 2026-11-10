@@ -293,8 +293,8 @@ jobs:
               static final float[] CLOCK_SIZES = {1f, 0.85f, 0.75f, 0.6f};
               static final String[] CLOCK_SIZE_NAMES = {"Full", "85%", "75%", "60%"};
               static final int[] MIX_COLS = {0xff1e88e5, 0xff8e24aa, 0xff43a047, 0xfffb8c00, 0xff00acc1, 0xffd81b60, 0xff5e35b1, 0xfffdd835};
-              static final String[] PLAYER_BTNS = {"⏮", "⏯", "⏭", "🔀", "💿", "🔍", "⏹"};
-              static final String[] PLAYER_BTN_NAMES = {"Previous song", "Play / pause", "Next song", "Shuffle", "CD folder", "Song list", "Stop"};
+              static final String[] PLAYER_BTNS = {"⏹", "⏮", "⏯", "⏭", "🔀", "🔍", ""};     // the last one is drawn as a little CD binder
+              static final String[] PLAYER_BTN_NAMES = {"Stop", "Back", "Play/pause", "Next", "Shuffle", "Song list", "CD folder"};
 
               static final int SEASON_NONE = 0, SEASON_XMAS = 1, SEASON_HALLOWEEN = 2, SEASON_VALENTINE = 3, SEASON_NEWYEAR = 4;
               static final String[] SEASON_PREF_NAMES = {"Auto", "Christmas", "Halloween", "Valentine's", "New Year", "Off"};
@@ -327,6 +327,9 @@ jobs:
                   int emote;
                   float emoteT, emoteDur, emoteDelay;
                   float hitT, throwBackT, ballT, hugX, hugY;
+                  AppPeng throwBackAt;        // who to throw back at (null = you)
+                  int throwBackDepth, spreeLeft;
+                  float replyT, noticeT, ignoreT;
                   boolean hugWalk;
                   float rallyX, rallyY;
                   AppPeng joinOf;      // joined someone else's conversation
@@ -341,6 +344,7 @@ jobs:
                   String bubble;
                   boolean hangout;            // staying put in one spot for a while
                   float spreeT, spreeNext;    // throwing snowballs about for a bit
+                  float lookT;                // when to glance somewhere else while standing about
               }
 
               static class Chair {
@@ -353,7 +357,8 @@ jobs:
               static class Ball {
                   float x, y, vx, vy, t, dur;
                   boolean fromPlayer, toy;
-                  AppPeng owner;
+                  AppPeng owner, target;      // target: a penguin this one was thrown at
+                  int depth;                  // how many throws back-and-forth led to this one
               }
 
               static class Part {
@@ -435,7 +440,9 @@ jobs:
               volatile long ytUserSkipAt, ytJumpUntil, ytPrevPos, ytPrevDur, ytTitleSince;
               // shuffle history: {0, queueId} for a direct queue jump, {1, steps} for a jump made by skipping
               final ArrayList<long[]> ytHistory = new ArrayList<>();
-              volatile boolean ytStepping, ytAfterJump;
+              volatile boolean ytStepping, ytAfterJump, ytShuffling;
+              volatile long ytShuffleAt;
+              final java.util.HashSet<Integer> ytPlayed = new java.util.HashSet<>();
               volatile long progPos, progDur, progAt;
               volatile boolean progPlaying;
               int playerRow;
@@ -456,6 +463,9 @@ jobs:
               final Object ezSpot = new Object(), bedSpot = new Object();
               boolean ezFollow, ezMoving, ezSleeping, ezVisiting, ezFetch;
               float ezFetchX, ezFetchY, ezFetchWait;
+              float ezNapCool, ezStuckT, ezDetourT, ezDetourX, ezDetourY, ezLastUX, ezLastUY;
+              boolean ezBlocked;
+              AppPeng ezPatPeng;      // the penguin giving him a pat right now (drawn in front of him)
               int ezScene = SCENE_ISLAND, ezFacing = RIGHT;
               float ezX = BED_X, ezY = BED_Y + 2, ezTX = BED_X, ezTY = BED_Y + 2;
               float ezWait = 3, ezPhase, ezBlinkT, ezNextBlink = 3, ezSleepT, ezVisitT = -1, ezReturnT = -1, ezStayT, ezHappyT;
@@ -504,6 +514,10 @@ jobs:
               final float[] flameH = {0.7f, 0.7f, 0.7f, 0.8f, 0.9f, 1f, 0.9f, 0.8f, 0.7f, 0.7f, 0.7f}, flameTarget = new float[11], flameT = new float[11];
               float fireLean;
               final float[] flameChar = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, flameCharTarget = new float[11], flameCharT = new float[11];
+              final float[] flameBase = {0.6f, 0.7f, 0.8f, 0.6f, 0.9f, 0.7f, 0.95f, 0.65f, 0.8f, 0.7f, 0.6f}, flamePeak = new float[11], flameGrow = new float[11];
+              // burnt flakes that lift off the flame tips, curl up and crumble away (like a burning tea bag)
+              final float[] ashX = new float[24], ashY = new float[24], ashVX = new float[24], ashVY = new float[24],
+                      ashRot = new float[24], ashSpin = new float[24], ashLife = new float[24], ashMax = new float[24], ashSize = new float[24], ashSeed = new float[24];
               static final float FSP = 23;     // gap between flame tongues (smaller = narrower fire)
               final float[] lickX = new float[10], lickY = new float[10], lickSize = new float[10], lickLife = new float[10], lickMax = new float[10], lickShape = new float[10];
               Path fireArch;
@@ -723,7 +737,7 @@ jobs:
                                   int rid = getResources().getIdentifier("fire", "raw", getPackageName());
                                   if (rid != 0) { soundIds[8] = sounds.load(this, rid, 1); continue; }
                               }
-                              File f = new File(dir, (i == 1 ? "sfx4_" : i == 8 ? "sfx9_" : "sfx2_") + names[i] + ".wav");
+                              File f = new File(dir, (i == 1 ? "sfx4_" : i == 8 ? "sfx9_" : i == 3 || i == 4 ? "sfx5_" : "sfx2_") + names[i] + ".wav");
                               if (!f.exists()) {
                                   float[] data;
                                   switch (i) {
@@ -1066,6 +1080,13 @@ jobs:
                       }
                   } catch (Exception ignored) { }
                   int cur = d.tracks != null ? trackIndex(d, stTitle(mc) != null ? stTitle(mc) : nowTitle) : -1;
+                  if (d.tracks != null && d.tracks.size() > 2 && resumed) {
+                      // Open the chosen song straight away (SmartTube pops up for a moment, then you're back on the island)
+                      int pick = shufflePick(d, cur);
+                      if (cur >= 0) ytHistory.add(new long[]{2, cur});
+                      ytLaunchTrack(d, pick);
+                      return;
+                  }
                   int delta;
                   if (cur >= 0) delta = randomTrackNear(d, cur) - cur;
                   else delta = 2 + rnd.nextInt(5);         // we can't tell where we are: hop a few songs forward
@@ -1074,10 +1095,45 @@ jobs:
                   ytStep(mc, delta, now);
               }
 
+              /** A random song from the disc that hasn't played yet this time round (and isn't the current one). */
+              int shufflePick(Disc d, int cur) {
+                  int n = d.tracks.size();
+                  if (ytPlayed.size() >= n - 1) ytPlayed.clear();
+                  if (cur >= 0) ytPlayed.add(cur);
+                  ArrayList<Integer> left = new ArrayList<>();
+                  for (int i = 0; i < n; i++) if (i != cur && !ytPlayed.contains(i)) left.add(i);
+                  if (left.isEmpty()) { for (int i = 0; i < n; i++) if (i != cur) left.add(i); }
+                  int pick = left.get(rnd.nextInt(left.size()));
+                  ytPlayed.add(pick);
+                  return pick;
+              }
+
+              /** Opens one song of the disc in SmartTube, keeping the shuffle history. */
+              void ytLaunchTrack(Disc d, int idx) {
+                  ArrayList<long[]> keep = new ArrayList<>(ytHistory);
+                  String[] t = d.tracks.get(idx);
+                  ytShuffling = true;
+                  ytShuffleAt = System.currentTimeMillis();
+                  playYouTube(d, t[0], t[1]);
+                  ytHistory.clear();
+                  ytHistory.addAll(keep);
+                  ytShuffling = true;
+                  ytShuffleAt = System.currentTimeMillis();
+                  ytAfterJump = true;
+                  ytUserSkipAt = System.currentTimeMillis();
+                  ytJumpUntil = System.currentTimeMillis() + 6000;
+              }
+
               /** Shuffle "previous": go back to the song before the last shuffle jump. */
               boolean ytShuffleBack(MediaController mc, long now) {
                   if (ytHistory.isEmpty()) return false;
                   long[] h = ytHistory.remove(ytHistory.size() - 1);
+                  if (h[0] == 2) {
+                      Disc d = nowDisc;
+                      if (d == null || d.tracks == null || h[1] >= d.tracks.size()) return false;
+                      ytLaunchTrack(d, (int) h[1]);
+                      return true;
+                  }
                   if (h[0] == 0) {
                       try {
                           ytUserSkipAt = now;
@@ -1241,7 +1297,7 @@ jobs:
                       MediaController mc = smartTubeSession();
                       boolean done = false;
                       Disc sd = nowDisc;
-                      if (ytStepping) { play(S_TICK, 0.3f, 0.7f); return; }   // still hopping to the last pick
+                      if (ytStepping || ytShuffling) { play(S_TICK, 0.3f, 0.7f); return; }   // still getting to the last pick
                       if (shuffleOn && mc != null && sd != null) {
                           // Shuffle on: next picks a random song, back returns to the one before it
                           long now = System.currentTimeMillis();
@@ -1342,6 +1398,7 @@ jobs:
                   ytLastTitle = null;
                   ytHistory.clear();
                   ytAfterJump = false;
+                  if (!ytShuffling) ytPlayed.clear();
                   updateMusic();
                   if (d.tracks == null) new Thread(() -> fetchTracks(d), "island-tracks").start();
                   int index = 1;
@@ -1600,7 +1657,8 @@ jobs:
                                       livePos = pos + (long) ((SystemClock.elapsedRealtime() - st.getLastPositionUpdateTime()) * st.getPlaybackSpeed());
                                   }
                                   progPos = livePos; progDur = dur; progAt = SystemClock.elapsedRealtime(); progPlaying = stPlaying;
-                                  if (title != null && !title.isEmpty() && !ytStepping) nowTitle = title;
+                                  if (ytShuffling && ((stPlaying && now - ytShuffleAt > 3000 && title != null && !title.isEmpty()) || now - ytShuffleAt > 15000)) ytShuffling = false;
+                                  if (title != null && !title.isEmpty() && !ytStepping && !ytShuffling) nowTitle = title;
                                   Disc cur = nowDisc;
                                   if (cur != null && stPlaying && title != null && !title.isEmpty() && cur.tracks != null) {
                                       if (onDisc(cur, title)) {
@@ -2118,25 +2176,44 @@ jobs:
                   w.setStyle(Paint.Style.STROKE);
                   w.setStrokeWidth(2);
                   w.setColor(0xff9cc3da);
-                  // Ice blocks laid in rings that follow the round floor: flat across the back wall,
-                  // curving down toward the floor at the sides, like the inside of a dome
-                  float ecx = 640, ecy = 720;
-                  Random wr = new Random(7);
-                  for (int i = 1; i <= 9; i++) {
-                      float ra = ROOM_FA + i * 62, rb = ROOM_FB + i * 54;
-                      float pa = ROOM_FA + (i - 1) * 62, pb = ROOM_FB + (i - 1) * 54;
-                      rf.set(ecx - ra, ecy - rb, ecx + ra, ecy + rb);
-                      c.drawArc(rf, 180, 180, false, w);
-                      // joints spaced by brick length (not by angle), each row shifted randomly,
-                      // so they don't line up into spokes
-                      float ma = (ra + pa) / 2, mb = (rb + pb) / 2;
-                      double half = Math.PI * Math.sqrt((ma * ma + mb * mb) / 2);
-                      int joints = Math.max(6, (int) (half / 105));
+                  // Ice blocks as seen from inside a dome: the low rows hug the round floor, the rows flatten out
+                  // higher up, and near the top they curve upward toward the sides, like looking up into the roof
+                  Random wr = new Random(5);
+                  final int ROWS = 11, SEGS = 120;
+                  float[][] rx = new float[ROWS][SEGS + 1], ry = new float[ROWS][SEGS + 1];
+                  for (int k = 0; k < ROWS; k++) {
+                      float yc = 270;
+                      for (int j = 0; j < k; j++) yc -= 46 * (float) Math.pow(0.9, j);
+                      float ra = ROOM_FA + k * 70, rb = ROOM_FB + (270 - yc);
+                      float wgt = Math.max(0, 1 - k / 5f);
+                      wgt = wgt * wgt * (3 - 2 * wgt);
+                      float curl = (float) Math.pow(k / (float) (ROWS - 1), 1.3) * 170;
+                      for (int i = 0; i <= SEGS; i++) {
+                          float t = i / (float) SEGS;
+                          double ang = Math.PI + Math.PI * t;
+                          float ex = 640 + ra * (float) Math.cos(ang), ey = 720 + rb * (float) Math.sin(ang);
+                          float px2 = -160 + 1600 * t, u = (px2 - 640) / 800;
+                          float py2 = yc - curl * u * u;
+                          rx[k][i] = wgt * ex + (1 - wgt) * px2;
+                          ry[k][i] = wgt * ey + (1 - wgt) * py2;
+                      }
+                      path.reset();
+                      path.moveTo(rx[k][0], ry[k][0]);
+                      for (int i = 1; i <= SEGS; i++) path.lineTo(rx[k][i], ry[k][i]);
+                      c.drawPath(path, w);
+                      if (k == 0) continue;
+                      // joints between this row and the one below, evenly spaced along the row, shifted randomly per row
+                      float len = 0;
+                      for (int i = 0; i < SEGS; i++) len += (float) Math.hypot(rx[k][i + 1] - rx[k][i], ry[k][i + 1] - ry[k][i]);
+                      int n = Math.max(8, (int) (len / (115 * Math.pow(0.94, k))));
                       float off = wr.nextFloat();
-                      for (int j = 0; j < joints; j++) {
-                          double ang = Math.PI + Math.PI * (j + off) / joints;
-                          float cs = (float) Math.cos(ang), sn = (float) Math.sin(ang);
-                          c.drawLine(ecx + cs * pa, ecy + sn * pb, ecx + cs * ra, ecy + sn * rb, w);
+                      for (int j = 0; j < n; j++) {
+                          float t = (j + off) / n * SEGS;
+                          int i0 = Math.min(SEGS - 1, (int) t);
+                          float fr = t - i0;
+                          float x1 = rx[k][i0] + (rx[k][i0 + 1] - rx[k][i0]) * fr, y1 = ry[k][i0] + (ry[k][i0 + 1] - ry[k][i0]) * fr;
+                          float x0 = rx[k - 1][i0] + (rx[k - 1][i0 + 1] - rx[k - 1][i0]) * fr, y0 = ry[k - 1][i0] + (ry[k - 1][i0 + 1] - ry[k - 1][i0]) * fr;
+                          c.drawLine(x0, y0, x1, y1, w);
                       }
                   }
                   w.setStyle(Paint.Style.FILL);
@@ -2147,6 +2224,8 @@ jobs:
                   w.setShader(null);
                   // Rug
                   float ru = -14;      // moved up a little, so it sits halfway between the hearth and the door
+                  w.setColor(0xff2f6f73);                                   // outer ring: deep teal
+                  c.drawOval(640 - 300, 402 + ru, 640 + 300, 618 + ru, w);
                   w.setColor(0xffb23a48);
                   c.drawOval(640 - 260, 420 + ru, 640 + 260, 600 + ru, w);
                   w.setColor(0xffe0a458);
@@ -2530,7 +2609,7 @@ jobs:
                       int stepNow = (int) (walkPhase / Math.PI);
                       if (stepNow != lastStep) {
                           lastStep = stepNow;
-                          play(S_STEP, scene == SCENE_ISLAND ? 0.35f : 0.25f, 0.85f + rnd.nextFloat() * 0.3f);
+                          play(S_STEP, scene == SCENE_ISLAND ? 0.3f : 0.21f, 0.85f + rnd.nextFloat() * 0.3f);
                       }
                   }
 
@@ -2658,7 +2737,7 @@ jobs:
                           play(S_WHOOSH, 0.5f, 0.8f);
                           break;
                       case E_THROW:
-                          play(S_WHOOSH, 0.45f, 1.3f);
+                          play(S_WHOOSH, 0.3f, 1f);
                           break;
                       case E_LOOK:
                           break;
@@ -2739,22 +2818,42 @@ jobs:
                       if (a.throwBackT > 0) {
                           a.throwBackT -= dt;
                           if (a.throwBackT <= 0) {
-                              a.facing = faceToward(a.x, a.y, px, py);
+                              if (a.throwBackAt != null) a.facing = faceToward(a.x, a.y, a.throwBackAt.x, a.throwBackAt.y);
+                              else a.facing = faceToward(a.x, a.y, px, py);
                               npcEmote(a, E_THROW, 0.45f, 0);
                               a.ballT = 0.22f;
                           }
                       }
                       if (a.ballT > 0) {
                           a.ballT -= dt;
-                          if (a.ballT <= 0) throwBall(false, a, a.x, a.y, a.facing);
+                          if (a.ballT <= 0) {
+                              if (a.throwBackAt != null) { throwAtPeng(a, a.throwBackAt, a.throwBackDepth); a.throwBackAt = null; }
+                              else throwBall(false, a, a.x, a.y, a.facing);
+                          }
                       }
 
                       if (a.spreeT > 0 && a.emote == E_NONE) {
-                          // having a snowball spree: lob one somewhere every second or two
+                          // playing with snowballs: one throw usually, now and then a few (never more than 4)
                           a.spreeT -= dt;
                           a.spreeNext -= dt;
-                          if (a.spreeNext <= 0 && a.spreeT > 0) {
-                              a.spreeNext = 1.1f + rnd.nextFloat() * 1f;
+                          if (a.spreeLeft <= 0) a.spreeT = Math.min(a.spreeT, 0.6f);
+                          AppPeng mark = null;
+                          if (a.spreeNext <= 0 && a.spreeLeft > 0 && rnd.nextFloat() < 0.35f) {
+                              // ...sometimes at another penguin
+                              for (AppPeng o : list) {
+                                  if (o == a || o.chatWith != null || o.emote != E_NONE || o.hugWalk) continue;
+                                  if (dist2(o.x, o.y, a.x, a.y) < 380 * 380 && dist2(o.x, o.y, a.x, a.y) > 60 * 60) { mark = o; break; }
+                              }
+                          }
+                          if (mark != null) {
+                              a.spreeNext = 1.2f + rnd.nextFloat() * 1f;
+                              a.spreeLeft--;
+                              a.facing = faceToward(a.x, a.y, mark.x, mark.y);
+                              npcEmote(a, E_THROW, 0.45f, 0);
+                              throwAtPeng(a, mark, 0);
+                          } else if (a.spreeNext <= 0 && a.spreeLeft > 0) {
+                              a.spreeLeft--;
+                              a.spreeNext = 1.2f + rnd.nextFloat() * 1f;
                               double ang = rnd.nextDouble() * Math.PI * 2;
                               float lx = a.x + (float) Math.cos(ang) * (150 + rnd.nextFloat() * 120), ly = a.y + (float) Math.sin(ang) * (90 + rnd.nextFloat() * 70);
                               a.facing = faceToward(a.x, a.y, lx, ly);
@@ -2766,7 +2865,7 @@ jobs:
                               b.toy = true;
                               b.owner = a;
                               balls.add(b);
-                              if (dist2(a.x, a.y, px, py) < 500 * 500) play(S_WHOOSH, 0.2f, 1.4f);
+                              playAt(S_WHOOSH, 0.2f, 1f, a.x, a.y);
                           }
                       }
                       if (a.emote != E_NONE) {
@@ -2826,15 +2925,35 @@ jobs:
                       boolean done = false;
                       if (b.toy) {
                           // a snowball tossed for Ezio to chase: it doesn't hit anyone
+                      } else if (b.target != null) {
+                          // penguin vs penguin
+                          for (AppPeng a : list) {
+                              if (a == b.owner) continue;
+                              if (z < 75 && dist2(a.x, a.y - 10, b.x, b.y) < 30 * 30) {
+                                  a.hitT = 2.2f;
+                                  if (b.owner != null) a.facing = faceToward(a.x, a.y, b.owner.x, b.owner.y);
+                                  npcEmote(a, E_FLINCH, 0.5f, 0);
+                                  playAt(S_SPLAT, 0.4f, 0.95f, a.x, a.y);
+                                  // sometimes they throw one back (and the odd one back again), sometimes they just shrug it off
+                                  if (b.owner != null && b.depth < 2 && rnd.nextFloat() < (b.depth == 0 ? 0.55f : 0.3f)) {
+                                      a.throwBackT = 0.9f + rnd.nextFloat() * 0.5f;
+                                      a.throwBackAt = b.owner;
+                                      a.throwBackDepth = b.depth + 1;
+                                  }
+                                  splat(b.x, b.y - z * 0.3f - 40);
+                                  done = true;
+                                  break;
+                              }
+                          }
                       } else if (b.fromPlayer) {
                           for (AppPeng a : list) {
                               if (z < 75 && dist2(a.x, a.y - 10, b.x, b.y) < 30 * 30) {
                                   a.hitT = 2.2f;
                                   a.facing = faceToward(a.x, a.y, px, py);
                                   npcEmote(a, E_FLINCH, 0.5f, 0);
-                                  play(S_SPLAT, 0.6f, 1f);
+                                  play(S_SPLAT, 0.4f, 0.95f);
                                   play(S_CHIRP, 0.18f, 1.15f);
-                                  if (rnd.nextFloat() < 0.6f) a.throwBackT = 0.9f + rnd.nextFloat() * 0.5f;
+                                  if (rnd.nextFloat() < 0.6f) { a.throwBackT = 0.9f + rnd.nextFloat() * 0.5f; a.throwBackAt = null; }
                                   splat(b.x, b.y - z * 0.3f - 40);
                                   done = true;
                                   break;
@@ -2842,14 +2961,14 @@ jobs:
                           }
                       } else if (z < 75 && dist2(px, py - 10, b.x, b.y) < 30 * 30) {
                           pHitT = 2.2f;
-                          play(S_SPLAT, 0.6f, 0.9f);
+                          play(S_SPLAT, 0.4f, 0.9f);
                           splat(b.x, b.y - 45);
                           done = true;
                       }
                       if (!done && b.t >= b.dur) {
                           float ex = (b.x - CX) / RX, ey = (b.y - CY) / RY;
                           if (ex * ex + ey * ey > 1) splash(b.x, b.y); else splat(b.x, b.y);
-                          play(S_SPLAT, 0.35f, 1.2f);
+                          playAt(S_SPLAT, 0.22f, 1f, b.x, b.y);
                           done = true;
                       }
                       if (done) it.remove();
@@ -2897,12 +3016,20 @@ jobs:
 
               void npcThink(AppPeng a, float dt, List<AppPeng> list) {
                   float pdx = px - a.x, pdy = py - a.y;
-                  if (pdx * pdx + pdy * pdy < 130 * 130) {
-                      if (a.chatWith != null) endChat(a);
-                      if (a.joinOf != null) leaveGroup(a);
-                      a.moving = false;
-                      a.facing = faceToward(a.x, a.y, px, py);
-                      return;
+                  a.ignoreT = Math.max(0, a.ignoreT - dt);
+                  boolean playerClose = pdx * pdx + pdy * pdy < 130 * 130;
+                  if (!playerClose) a.noticeT = 0;
+                  if (playerClose && a.ignoreT <= 0) {
+                      // they turn to look at you for a few seconds... then lose interest and get on with things
+                      a.noticeT += dt;
+                      if (a.noticeT > 4 + ((a.label == null ? 0 : a.label.length()) % 4)) { a.noticeT = 0; a.ignoreT = 25; a.wait = 0; }
+                      else {
+                          if (a.chatWith != null) endChat(a);
+                          if (a.joinOf != null) leaveGroup(a);
+                          a.moving = false;
+                          a.facing = faceToward(a.x, a.y, px, py);
+                          return;
+                      }
                   }
                   if (a.joinOf != null) {
                       AppPeng h = a.joinOf, h2 = h.chatWith;
@@ -2923,9 +3050,9 @@ jobs:
                       a.joinSpeakT -= dt;
                       if (a.joinSpeakT <= 0) {
                           a.speaking = !a.speaking;
-                          a.joinSpeakT = a.speaking ? 0.9f + rnd.nextFloat() * 1.2f : 1.8f + rnd.nextFloat() * 3f;
+                          if (a.speaking) a.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
+                          a.joinSpeakT = a.speaking ? speakTime(a.bubble) : 2.5f + rnd.nextFloat() * 3.5f;
                           if (a.speaking) {
-                              a.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
                               if (rnd.nextFloat() < 0.3f) npcEmote(a, E_FLAP, 0.6f, 0);
                           }
                       }
@@ -2939,14 +3066,20 @@ jobs:
                       if (a.speaking) {
                           a.speakT -= dt;
                           if (a.speakT <= 0) {
+                              // done talking: a little pause before the other one answers
                               a.speaking = false;
-                              o.speaking = true;
-                              o.speakT = 1f + rnd.nextFloat() * 1.4f;
-                              o.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
+                              o.replyT = 0.6f + rnd.nextFloat() * 1.2f;
+                          }
+                      } else if (a.replyT > 0) {
+                          a.replyT -= dt;
+                          if (a.replyT <= 0) {
+                              a.speaking = true;
+                              a.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
+                              a.speakT = speakTime(a.bubble);
                               float roll = rnd.nextFloat();
-                              if (roll < 0.1f) { hugPair(a, o); return; }
-                              if (roll < 0.28f) npcEmote(o, E_FLAP, 0.6f, 0);
-                              else if (roll < 0.44f) npcEmote(a, E_HOP, 0.5f, 0);
+                              if (roll < 0.088f) { hugPair(a, o); return; }
+                              if (roll < 0.24f) npcEmote(a, E_FLAP, 0.6f, 0);
+                              else if (roll < 0.38f) npcEmote(o, E_HOP, 0.5f, 0);
                               if (rnd.nextFloat() < 0.3f && dist2(a.x, a.y, px, py) < 450 * 450) play(S_CHIRP, 0.05f, 0.95f + rnd.nextFloat() * 0.2f);
                           }
                       }
@@ -2958,10 +3091,18 @@ jobs:
                       a.wait -= dt;
                       a.moving = false;
                       float roll = rnd.nextFloat();
-                      if (roll < dt * 0.04f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
-                      else if (roll < dt * 0.07f) soloEmote(a);
-                      else if (roll < dt * (a.hangout ? 0.11f : 0.176f)) tryStartChat(a, list);
+                      // (everything about 12% less often than before; chats about half as often)
+                      if (roll < dt * 0.035f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
+                      else if (roll < dt * 0.062f) soloEmote(a);
+                      else if (roll < dt * (a.hangout ? 0.09f : 0.11f)) tryStartChat(a, list);
                       if (a.wait <= 0) a.hangout = false;
+                      // glance about now and then, so standing penguins don't all stare straight out at you
+                      a.lookT -= dt;
+                      if (a.lookT <= 0 && a.emote == E_NONE) {
+                          a.lookT = 1.5f + rnd.nextFloat() * 2.5f;
+                          float lr = rnd.nextFloat();
+                          a.facing = lr < 0.35f ? LEFT : lr < 0.7f ? RIGHT : lr < 0.85f ? UP : DOWN;
+                      }
                       return;
                   }
                   if (a.chatWith != null) {
@@ -2977,19 +3118,21 @@ jobs:
                           a.arrived = true;
                           a.facing = faceToward(a.x, a.y, o.x, o.y);
                           if (o.arrived) {
-                              float dur = 5 + rnd.nextFloat() * 5;
+                              float dur = 11 + rnd.nextFloat() * 9;
                               a.chatTalking = o.chatTalking = true;
                               a.chatT = o.chatT = 0;
                               a.chatDur = o.chatDur = dur;
+                              a.replyT = o.replyT = 0;
                               a.speaking = true;
-                              a.speakT = 1f + rnd.nextFloat();
                               a.bubble = CHAT_BITS[rnd.nextInt(CHAT_BITS.length)];
+                              a.speakT = speakTime(a.bubble);
                           }
                           return;
                       }
                       // sometimes they just hang out where they are for a good while
                       a.hangout = rnd.nextFloat() < 0.35f;
-                      a.wait = a.hangout ? 12 + rnd.nextFloat() * 18 : 1.5f + rnd.nextFloat() * 3.5f;
+                      a.wait = a.hangout ? 6 + rnd.nextFloat() * 8 : 1.5f + rnd.nextFloat() * 3.5f;
+                      a.lookT = 0.8f + rnd.nextFloat() * 1.5f;
                       a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 90;
                       a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
                   } else {
@@ -3008,10 +3151,41 @@ jobs:
                   switch (rnd.nextInt(4)) {
                       case 0: npcEmote(a, E_WAVE, dur, 0); break;
                       case 1: npcEmote(a, E_DANCE, dur, 0); break;
-                      case 2: a.spreeT = dur; a.spreeNext = 0.2f; break;
+                      case 2: {
+                          float r = rnd.nextFloat();
+                          a.spreeLeft = r < 0.55f ? 1 : r < 0.8f ? 2 : r < 0.93f ? 3 : 4;
+                          a.spreeT = 30; a.spreeNext = 0.2f;
+                          break;
+                      }
                       default: a.facing = DOWN; npcEmote(a, E_NAP, dur, 0); break;
                   }
                   a.wait = Math.max(a.wait, 1.5f);
+              }
+
+              /** How long a speech bubble stays up: longer lines get more time. */
+              float speakTime(String bubble) {
+                  int len = bubble == null ? 1 : bubble.length();
+                  return 1.6f + Math.min(len, 6) * 0.35f + rnd.nextFloat() * 1.2f;
+              }
+
+              /** Plays a sound from somewhere on the island: quieter the further from you, silent when far off. */
+              void playAt(int snd, float vol, float rate, float x, float y) {
+                  float d = (float) Math.sqrt(dist2(x, y, px, py));
+                  float k = 1 - d / 650f;
+                  if (k <= 0.03f) return;
+                  play(snd, vol * k, rate);
+              }
+
+              /** Throws a snowball from penguin a straight at another penguin. */
+              void throwAtPeng(AppPeng a, AppPeng o, int depth) {
+                  Ball b = new Ball();
+                  float dx = o.x - a.x, dy = o.y - a.y, d = (float) Math.max(1, Math.sqrt(dx * dx + dy * dy));
+                  b.x = a.x + dx / d * 20; b.y = a.y + dy / d * 10;
+                  b.dur = Math.max(0.45f, Math.min(0.9f, d / 520f));
+                  b.vx = (o.x - b.x) / b.dur; b.vy = (o.y - 10 - b.y) / b.dur;
+                  b.owner = a; b.target = o; b.depth = depth;
+                  balls.add(b);
+                  playAt(S_WHOOSH, 0.22f, 1f, a.x, a.y);
               }
 
               void tryStartChat(AppPeng a, List<AppPeng> list) {
@@ -3077,29 +3251,70 @@ jobs:
                   }
               }
 
+              /** The top of flame i tears off: a lick of flame floats up, and now and then a burnt flake with it. */
+              void breakFlameTip(int i) {
+                  float base = 250 * (1 - Math.abs(i - 5) / 7f);
+                  float lean = fireLean * (0.6f + 0.4f * (1 - Math.abs(i - 5) / 5f));
+                  float tx = 640 + (i - 5) * FSP + lean, ty = 596 - base * flameH[i] * 0.95f;
+                  for (int k = 0; k < lickX.length; k++) {
+                      if (lickLife[k] > 0) continue;
+                      lickX[k] = tx; lickY[k] = ty;
+                      lickSize[k] = 6 + rnd.nextFloat() * 7;
+                      lickShape[k] = rnd.nextFloat();
+                      lickMax[k] = lickLife[k] = 0.35f + rnd.nextFloat() * 0.35f;
+                      break;
+                  }
+                  if (rnd.nextFloat() < 0.35f) {
+                      for (int k = 0; k < ashX.length; k++) {
+                          if (ashLife[k] > 0) continue;
+                          ashX[k] = tx; ashY[k] = ty + 6;
+                          ashVX[k] = (rnd.nextFloat() - 0.5f) * 40; ashVY[k] = -45 - rnd.nextFloat() * 40;
+                          ashRot[k] = rnd.nextFloat() * 360; ashSpin[k] = (rnd.nextFloat() - 0.5f) * 260;
+                          ashMax[k] = ashLife[k] = 1.6f + rnd.nextFloat() * 1.4f;
+                          ashSize[k] = 6 + rnd.nextFloat() * 6;
+                          ashSeed[k] = rnd.nextFloat();
+                          break;
+                      }
+                  }
+              }
+
               void updateFire(float dt) {
                   fireHintT += dt;
                   // whole-fire sway, slow and gentle
                   fireLean = (float) Math.sin(time * 1.3f) * 9 + (float) Math.sin(time * 2.9f + 1) * 5;
                   // each flame picks a new height every so often and eases toward it; middle flames reach higher
-                  // each flame jumps to a new height often and gets there fast, so it flickers instead of gliding
+                  // Each flame climbs on its own, and when it reaches its peak the tip tears off and floats away
+                  // (a lick of flame, sometimes a burnt flake), and the flame drops back and climbs again.
+                  // Every flame is at a different point in that cycle, so the fire never swells as one.
                   for (int i = 0; i < 11; i++) {
+                      float centre = 1 - Math.abs(i - 5) / 5f;
+                      if (flamePeak[i] <= 0) { flamePeak[i] = (0.72f + 0.33f * centre) * (0.85f + rnd.nextFloat() * 0.35f); flameGrow[i] = 0.5f + rnd.nextFloat() * 0.5f; }
+                      flameBase[i] += flameGrow[i] * dt;
+                      if (flameBase[i] >= flamePeak[i]) {
+                          breakFlameTip(i);
+                          flameBase[i] *= 0.6f + rnd.nextFloat() * 0.15f;
+                          flamePeak[i] = (0.72f + 0.33f * centre) * (0.85f + rnd.nextFloat() * 0.35f);
+                          flameGrow[i] = 0.45f + rnd.nextFloat() * 0.6f;
+                      }
+                      // small, quick wobble on top
                       flameT[i] -= dt;
                       if (flameT[i] <= 0) {
-                          float centre = 1 - Math.abs(i - 5) / 5f;          // 1 in the middle, 0 at the edges
-                          // each flame has its own height for a while (some tall, some short, gaps between),
-                          // with small quick jumps around it
-                          float mid = (0.72f + 0.33f * centre) * flameChar[i];
-                          flameTarget[i] = mid * (0.88f + rnd.nextFloat() * 0.24f);
+                          flameTarget[i] = 0.94f + rnd.nextFloat() * 0.12f;
                           flameT[i] = 0.05f + rnd.nextFloat() * 0.14f;
                       }
-                      flameH[i] += (flameTarget[i] - flameH[i]) * Math.min(1, dt * 16f);
-                      flameCharT[i] -= dt;
-                      if (flameCharT[i] <= 0) {
-                          flameCharTarget[i] = 0.55f + rnd.nextFloat() * 0.65f;
-                          flameCharT[i] = 1.5f + rnd.nextFloat() * 2.5f;
-                      }
-                      flameChar[i] += (flameCharTarget[i] - flameChar[i]) * Math.min(1, dt * 2.5f);
+                      flameChar[i] += (flameTarget[i] - flameChar[i]) * Math.min(1, dt * 16f);
+                      flameH[i] = flameBase[i] * flameChar[i];
+                  }
+                  // burnt flakes: lift, tumble, crumple and crumble away
+                  for (int k = 0; k < ashX.length; k++) {
+                      if (ashLife[k] <= 0) continue;
+                      ashLife[k] -= dt;
+                      ashVY[k] -= 12 * dt;
+                      ashVX[k] += ((640 - ashX[k]) * 0.25f + (float) Math.sin(time * 3 + ashSeed[k] * 5) * 30) * dt;
+                      ashX[k] += ashVX[k] * dt;
+                      ashY[k] += ashVY[k] * dt;
+                      ashRot[k] += ashSpin[k] * dt;
+                      if (ashY[k] < 300) ashLife[k] -= dt * 3;
                   }
                   updateFireEzio(dt);
                   // flame licks: spawn near the flame tips, rise and shrink
@@ -3134,7 +3349,7 @@ jobs:
                       Part q = part(640 + (rnd.nextFloat() - 0.5f) * 240, 540 + rnd.nextFloat() * 40, false);
                       q.vx = 0; q.vy = -40 - rnd.nextFloat() * 14;
                       q.max = q.life = 6f; q.size = 34 + rnd.nextFloat() * 14; q.grow = 1f;
-                      q.color = 0xffa39d97;      // light grey, so it shows against the dark back of the fireplace
+                      q.color = 0xff736b66;      // mid grey: clean-burning, but you can see it
                       q.seed = rnd.nextFloat() * 6.28f;
                       q.flue = true; q.flueX = 640; q.flueTop = 290;
                   }
@@ -3162,14 +3377,15 @@ jobs:
 
               // Ezio in the fireplace view: 0 sitting on his bed, 1 asleep on it, 2 on the move, 3 standing about
               static final float FX_BED = 1176;          // bed sits at the right edge, on top of the hearth
-              static final float FX_HEARTH_TOP = 622;    // back edge of the hearth's top
+              static final float FX_HEARTH_TOP = 610;    // back edge of the hearth's top
               static final float FX_HEARTH_FACE = 654;   // where the top meets the front face
               static final float FX_FLOOR_TOP = 686;     // where the hearth's front meets the snowy floor
-              static final float FX_BED_Y = 643;         // where the bed rests on the hearth top
-              static final float FX_HEARTH_Y = 641;      // Ezio's feet when he's up on the hearth
+              static final float FX_BED_Y = 638;         // where the bed rests on the hearth top
+              static final float FX_HEARTH_Y = 636;      // Ezio's feet when he's up on the hearth
               static final float FX_FLOOR_Y = 710;       // Ezio's feet when he's on the floor in front of the hearth
               static final float FX_NOGO_L = 335, FX_NOGO_R = 925;   // in front of the fire: he won't walk on the hearth here
               static final float WALK = 105, RUN = 270, SPRINT = 440;
+              static final float FX_SPRAWL_X = 245;      // middle of the stone to the left of the fire opening
               float fxY = FX_HEARTH_Y, fxHopT, fxHopFrom, fxHopTo;
               float fxX = FX_BED, fxT;
               int fxState, fxFacing = LEFT, fxNext;
@@ -3208,18 +3424,21 @@ jobs:
               /** Picks what he does next: nap in bed, potter about, get the zoomies, or go out and come tearing back. */
               void fxPlanNext() {
                   float r = rnd.nextFloat();
-                  if (r < 0.4f) {
+                  if (r < 0.55f) {
                       // bed: sit and stare, or curl up and sleep
                       fxNext = rnd.nextFloat() < 0.5f ? 0 : 1;
                       fxStop(FX_BED, 0, WALK, -1);
                   } else if (r < 0.65f) {
+                      // the Maine Coon sprawl: flops over on his side on the floor, in line with the left of the fireplace
+                      fxStop(FX_SPRAWL_X, 1, WALK, -2);
+                  } else if (r < 0.80f) {
                       // potter about: a few slow walks, hopping up and down between the hearth and the floor
                       int n = 2 + rnd.nextInt(3);
                       for (int i = 0; i < n; i++) {
                           float[] sp = fxSpot(0.45f);
                           fxStop(sp[0], (int) sp[1], WALK, 1.2f + rnd.nextFloat() * 3);
                       }
-                  } else if (r < 0.85f) {
+                  } else if (r < 0.92f) {
                       // zoomies: tearing back and forth, with the odd leap up onto the hearth
                       int n = 4 + rnd.nextInt(4);
                       for (int i = 0; i < n; i++) {
@@ -3285,6 +3504,13 @@ jobs:
                       if (goX != tx) return;
                       if (wantHearth && !onHearth) { fxHop(true); return; }       // hop up right here (always outside the fire)
                       fxPlan.remove(0);
+                      if (wp[3] == -2) {
+                          // flop over on one side or the other for a good long lounge
+                          fxState = 4; fxFacing = rnd.nextBoolean() ? LEFT : RIGHT;
+                          fxT = 15 + rnd.nextFloat() * 20;
+                          fxPlan.clear();
+                          return;
+                      }
                       if (Math.abs(fxX - FX_BED) < 4 && wantHearth && wp[3] < 0) {
                           fxState = fxNext; fxFacing = LEFT; fxT = 6 + rnd.nextFloat() * 9;
                           fxPlan.clear();
@@ -3428,7 +3654,7 @@ jobs:
                   b.fromPlayer = fromPlayer;
                   b.owner = owner;
                   balls.add(b);
-                  if (!fromPlayer) play(S_WHOOSH, 0.35f, 1.4f);
+                  if (!fromPlayer) playAt(S_WHOOSH, 0.22f, 1f, x, y);
                   else if (ezFollow && ezScene == SCENE_ISLAND && !ezFetch) {
                       // Ezio chases your snowball to where it lands, then comes back to you
                       float lx = b.x + b.vx * b.dur, ly = b.y + b.vy * b.dur;
@@ -3478,7 +3704,7 @@ jobs:
                   switch (o) {
                       case "door": return null;
                       case "exit": return null;
-                      case "tv": return emulatorApp() != null ? "Press OK to play games" : "Press OK for TV Settings";
+                      case "tv": return emulatorApp() != null ? null : "Press OK for TV Settings";
                       case "shelf": return "Press OK for Island settings";
                       case "fire": return "Press OK to sit by the fire";
                       case "cd": return null;
@@ -3568,13 +3794,13 @@ jobs:
                       else if (code == KeyEvent.KEYCODE_DPAD_LEFT) { playerSel = Math.max(0, playerSel - 1); play(S_TICK, 0.35f, 1f); }
                       else if (ok && !repeat) {
                           switch (playerSel) {
-                              case 0: radioSkip(-1); break;
-                              case 1: radioToggle(); break;
-                              case 2: radioSkip(1); break;
-                              case 3: setShuffle(!shuffleOn); break;
-                              case 4: overlay = OV_NONE; openFolder(); break;
+                              case 0: stopRadio(); overlay = OV_NONE; play(S_TOGGLE, 0.45f, 0.7f); break;
+                              case 1: radioSkip(-1); break;
+                              case 2: radioToggle(); break;
+                              case 3: radioSkip(1); break;
+                              case 4: setShuffle(!shuffleOn); break;
                               case 5: if (nowDisc != null) openSongList(nowDisc, () -> { overlay = OV_PLAYER; }); break;
-                              case 6: stopRadio(); overlay = OV_NONE; play(S_TOGGLE, 0.45f, 0.7f); break;
+                              case 6: overlay = OV_NONE; openFolder(); break;
                           }
                           if (nowDisc == null && overlay == OV_PLAYER) overlay = OV_NONE;
                       }
@@ -3864,6 +4090,8 @@ jobs:
                   ezSleeping = false;
                   ezHappyT = 1.6f;
                   ezFacing = px < ezX ? LEFT : RIGHT;
+                  facing = ezX < px ? LEFT : RIGHT;
+                  startEmote(E_PAT, 1.6f);
                   ezWait = 3;
                   play(S_CHIRP, 0.2f, 0.6f);
                   for (int i = 0; i < 4; i++) spawnHeart(ezX + (rnd.nextFloat() - 0.5f) * 20, ezY - 40);
@@ -3919,7 +4147,26 @@ jobs:
                   }
 
                   boolean inside = ezScene == SCENE_IGLOO;
+                  // Stuck? (trying to walk but not getting anywhere, e.g. pushing against the igloo wall)
+                  // After a second and a half of that he steps off sideways and, if roaming, picks somewhere else to go.
+                  if (ezBlocked) ezStuckT += dt; else ezStuckT = 0;
+                  ezBlocked = false;
+                  if (ezStuckT > 1.5f) {
+                      ezStuckT = 0;
+                      float side = rnd.nextBoolean() ? 1 : -1;
+                      ezDetourX = -ezLastUY * side; ezDetourY = ezLastUX * side;
+                      if (ezDetourX == 0 && ezDetourY == 0) ezDetourX = side;
+                      ezDetourT = 0.8f + rnd.nextFloat() * 0.6f;
+                      if (!ezFollow) { ezPeng = null; ezRun = false; ezGoBed = false; pickEzRoam(inside); }
+                  }
                   ezMoving = false;
+                  if (ezDetourT > 0) {
+                      ezDetourT -= dt;
+                      ezStep(ezDetourX, ezDetourY, 110 * dt, inside);
+                      return;
+                  }
+                  ezNapCool = Math.max(0, ezNapCool - dt);
+                  if (ezHappyT <= 0) ezPatPeng = null;
                   if (ezFollow) {
                       ezSleeping = false;
                       ezPeng = null;
@@ -3931,7 +4178,12 @@ jobs:
                               ezStep(dx / d, dy / d, Math.min(d, 300 * dt), inside);
                               return;
                           }
-                          if (ezFetchWait < 0) ezFetchWait = 0.7f + rnd.nextFloat() * 0.6f;
+                          if (ezFetchWait < 0) {
+                              // caught it!
+                              ezFetchWait = 1.2f + rnd.nextFloat() * 0.6f;
+                              ezHappyT = 1.2f;
+                              splat(ezX + (ezFacing == LEFT ? -12 : 12), ezY - 6);
+                          }
                           ezFetchWait -= dt;
                           if (ezFetchWait <= 0) ezFetch = false;
                           return;
@@ -3970,7 +4222,7 @@ jobs:
                   }
                   if (ezSleeping) {
                       ezSleepT -= dt;
-                      if (ezSleepT <= 0) { ezSleeping = false; ezWait = 1 + rnd.nextFloat() * 2; }
+                      if (ezSleepT <= 0) { ezSleeping = false; ezWait = 1 + rnd.nextFloat() * 2; ezNapCool = 60; }
                       return;
                   }
                   if (ezWait > 0) { ezWait -= dt; return; }
@@ -4003,6 +4255,7 @@ jobs:
                           // a pat on the head: two or three gentle pats
                           a.facing = ezX < a.x ? LEFT : RIGHT;
                           npcEmote(a, E_PAT, 1.6f, 0);
+                          ezPatPeng = a;
                           ezHappyT = 1.8f;
                           ezWait = 2.5f;
                           play(S_CHIRP, 0.12f, 0.6f);
@@ -4022,7 +4275,7 @@ jobs:
                           b.toy = true;
                           b.owner = a;
                           balls.add(b);
-                          play(S_WHOOSH, 0.3f, 1.4f);
+                          playAt(S_WHOOSH, 0.22f, 1f, a.x, a.y);
                           ezTX = lx; ezTY = ly;
                           ezRun = true;
                           ezWait = 0.3f;
@@ -4052,7 +4305,7 @@ jobs:
                   if (ezGoBed) {
                       ezGoBed = false;
                       ezSleeping = true;
-                      ezSleepT = inside ? 25 + rnd.nextFloat() * 30 : 12 + rnd.nextFloat() * 20;
+                      ezSleepT = inside ? 25 + rnd.nextFloat() * 30 : 20 + rnd.nextFloat() * 40;
                       return;
                   }
                   ezWait = 2 + rnd.nextFloat() * 4;
@@ -4066,23 +4319,40 @@ jobs:
                       }
                       if (best != null) { ezPeng = best; return; }
                   }
+                  if (!inside && ezNapCool <= 0 && rnd.nextFloat() < 0.25f) {
+                      ezGoBed = true; ezTX = BED_X; ezTY = BED_Y + 2;
+                  } else pickEzRoam(inside);
+              }
+
+              /** Somewhere for Ezio to wander to: inside, around the rug; outside, near his bed or right across the island. */
+              void pickEzRoam(boolean inside) {
                   if (inside) {
                       ezTX = 520 + rnd.nextFloat() * 240; ezTY = 460 + rnd.nextFloat() * 70;
-                  } else if (rnd.nextFloat() < 0.3f) {
-                      ezGoBed = true; ezTX = BED_X; ezTY = BED_Y + 2;
-                  } else {
+                  } else if (rnd.nextFloat() < 0.4f) {
                       double a = rnd.nextDouble() * Math.PI * 2;
                       float r = 60 + rnd.nextFloat() * 170;
                       ezTX = BED_X + (float) Math.cos(a) * r; ezTY = BED_Y + (float) Math.sin(a) * r * 0.6f;
+                  } else {
+                      // a proper wander, anywhere on the island
+                      double a = rnd.nextDouble() * Math.PI * 2;
+                      float r = (float) Math.sqrt(rnd.nextFloat()) * 0.85f;
+                      ezTX = CX + (float) Math.cos(a) * (RX - 80) * r; ezTY = CY + (float) Math.sin(a) * (RY - 70) * r;
+                      float ix = (ezTX - IGLOO_X) / 170f, iy = (ezTY - (IGLOO_Y - 22)) / 70f;
+                      if (ix * ix + iy * iy < 1) ezTY = IGLOO_Y + 60;
                   }
               }
 
               /** One step for Ezio, kept on the island (and off the igloo and boombox) or inside the room. */
               void ezStep(float ux, float uy, float len, boolean inside) {
                   float nx = ezX + ux * len, ny = ezY + uy * len;
+                  float ox = ezX, oy = ezY;
+                  ezLastUX = ux; ezLastUY = uy;
                   if (inside) {
                       nx = Math.max(170, Math.min(1110, nx));
-                      ny = Math.max(nx > 780 && nx < 900 ? 300 : nx > 380 && nx < 900 ? 345 : 400, Math.min(705, ny));
+                      ny = Math.max(nx > 740 && nx < 840 ? 300 : nx > 380 && nx < 900 ? 345 : 400, Math.min(705, ny));
+                      float rxe = (nx - 640) / (ROOM_FA - 40), rye = (ny - 720) / (ROOM_FB - 30);
+                      float re = rxe * rxe + rye * rye;
+                      if (re > 1 && !(nx > 740 && nx < 840 && ny < 340)) { float k = (float) (1 / Math.sqrt(re)); nx = 640 + (nx - 640) * k; ny = 720 + (ny - 720) * k; }
                   } else {
                       float ex = (nx - CX) / (RX - 45), ey = (ny - CY) / (RY - 40);
                       float e = ex * ex + ey * ey;
@@ -4094,6 +4364,7 @@ jobs:
                   if (Math.abs(ux) > 0.2f) ezFacing = ux < 0 ? LEFT : RIGHT;
                   ezX = nx; ezY = ny;
                   ezMoving = true;
+                  if (len > 0.4f && Math.hypot(nx - ox, ny - oy) < len * 0.3f) ezBlocked = true;
               }
 
               /**
@@ -4204,6 +4475,81 @@ jobs:
                   }
                   c.restore();
                   if (ezHappyT > 0 && rnd.nextFloat() < 0.15f) spawnHeart(x, y - 52 * s);
+              }
+
+              /** Ezio flopped over on his side like a proper Maine Coon: long fluffy body, legs out front, tail stretched behind, head up. */
+              void drawEzioSprawl(Canvas c, float x, float y, float s, int face, float phase, boolean blink, int season) {
+                  final int FUR = 0xff16141b, FUR2 = 0xff24212b;
+                  c.save();
+                  c.translate(x, y);
+                  c.scale(face == LEFT ? -s : s, s);
+                  p.setColor(0x30000000);
+                  c.drawOval(-40, -4, 34, 5, p);
+                  // fluffy tail stretched out behind along the floor, the tip flicking now and then
+                  float flick = (float) Math.sin(phase * 0.5f) * 3;
+                  p.setColor(FUR);
+                  for (int i = 0; i < 10; i++) {
+                      float t = i / 9f;
+                      c.drawCircle(-24 - t * 26, -5 - t * 2 - (t > 0.7f ? flick * (t - 0.7f) * 3 : 0), 5 + t * 2.5f, p);
+                  }
+                  // back legs tucked, front legs stretched out in front
+                  rf.set(-22, -8, -4, 0); c.drawRoundRect(rf, 4, 4, p);
+                  p.setColor(FUR2);
+                  rf.set(6, -7, 30, 0); c.drawRoundRect(rf, 3.5f, 3.5f, p);
+                  p.setColor(FUR);
+                  rf.set(8, -5, 33, 1); c.drawRoundRect(rf, 3.5f, 3.5f, p);
+                  // long, low, fluffy body
+                  c.drawOval(-30, -24, 16, 0, p);
+                  for (int i = 0; i < 12; i++) {
+                      float t = i / 11f;
+                      float bx = -27 + t * 40, by = -22 + (float) Math.sin(t * Math.PI) * -3;
+                      c.drawCircle(bx, by, 4.2f, p);
+                  }
+                  // breathing: the body rises a touch
+                  float br = (float) Math.sin(phase * 0.8f) * 0.8f;
+                  // head up at the front
+                  float hx = 16, hy = -28 - br;
+                  c.drawCircle(hx, hy, 10, p);
+                  for (int i = 0; i < 8; i++) {
+                      double a = Math.PI * 2 * i / 8.0;
+                      c.drawCircle(hx + (float) Math.cos(a) * 9.5f, hy + (float) Math.sin(a) * 9.5f, 2.6f, p);
+                  }
+                  path.reset();
+                  path.moveTo(hx - 9, hy - 4); path.lineTo(hx - 7, hy - 17); path.lineTo(hx - 1, hy - 8); path.close();
+                  path.moveTo(hx + 2, hy - 8); path.lineTo(hx + 9, hy - 17); path.lineTo(hx + 10, hy - 3); path.close();
+                  c.drawPath(path, p);
+                  p.setColor(0xffd88a9a);
+                  path.reset();
+                  path.moveTo(hx - 7.5f, hy - 6); path.lineTo(hx - 6.5f, hy - 13); path.lineTo(hx - 3, hy - 8); path.close();
+                  path.moveTo(hx + 4, hy - 8); path.lineTo(hx + 8, hy - 13); path.lineTo(hx + 8.5f, hy - 5); path.close();
+                  c.drawPath(path, p);
+                  if (blink) {
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(1.6f);
+                      p.setColor(0xfff2f2f2);
+                      c.drawLine(hx - 7, hy, hx - 1, hy, p);
+                      c.drawLine(hx + 2, hy, hx + 8, hy, p);
+                      p.setStyle(Paint.Style.FILL);
+                  } else {
+                      p.setColor(0xffffffff);
+                      c.drawCircle(hx - 4, hy, 4.4f, p);
+                      c.drawCircle(hx + 5, hy, 4.4f, p);
+                      p.setColor(0xff111111);
+                      c.drawCircle(hx - 3.2f, hy + 0.6f, 1.9f, p);
+                      c.drawCircle(hx + 5.6f, hy - 0.2f, 1.9f, p);
+                  }
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(0.8f);
+                  p.setColor(0x88ffffff);
+                  c.drawLine(hx + 8, hy + 4, hx + 16, hy + 2, p);
+                  c.drawLine(hx + 8, hy + 5, hx + 16, hy + 6, p);
+                  c.drawLine(hx - 6, hy + 4, hx - 14, hy + 2, p);
+                  p.setStyle(Paint.Style.FILL);
+                  if (season == SEASON_XMAS) {
+                      p.setColor(0xffe53935);
+                      drawStar(c, hx, hy - 16, 6);
+                  }
+                  c.restore();
               }
 
               /** A string of twinkling Christmas lights wrapped around Ezio. */
@@ -4377,7 +4723,7 @@ jobs:
 
               void openPlayer() {
                   overlay = OV_PLAYER;
-                  playerSel = 1;
+                  playerSel = 2;
                   playerRow = 0;
                   pEmote = E_NONE;
                   play(S_TICK, 0.45f, 1.2f);
@@ -4670,7 +5016,7 @@ jobs:
                       if (!q.world && q.grow > 0) {
                           // fireplace smoke: soft-edged puffs, wide at the bottom, squeezed thinner as they rise
                           float fadeIn = Math.min(1, q.age / 1.5f);
-                          int sa = (int) (a * 0.42f * fadeIn);
+                          int sa = (int) (a * 0.55f * fadeIn);
                           float sx = q.x + (float) Math.sin(time * 0.9f + q.seed) * 8;
                           float narrow = Math.max(0.15f, Math.min(1f, (q.y - q.flueTop) / 260f));
                           float rr = q.size * narrow;
@@ -4982,7 +5328,13 @@ jobs:
                   if (o == this) return py;
                   if (o == cdSpot) return CD_Y;
                   if (o == iglooSpot) return IGLOO_Y - 12;
-                  if (o == ezSpot) return ezY;
+                  if (o == ezSpot) {
+                      // whoever's patting him stands in front, so the flipper lands on top of his head
+                      float y = ezY;
+                      if (ezPatPeng != null && ezHappyT > 0) y = Math.min(y, ezPatPeng.y - 1);
+                      if (pEmote == E_PAT) y = Math.min(y, py - 1);
+                      return y;
+                  }
                   if (o == bedSpot) return BED_Y - 6;
                   if (o instanceof Chair) return ((Chair) o).y;
                   return ((AppPeng) o).y;
@@ -5043,13 +5395,15 @@ jobs:
                   // Player (and a cozy chirp when sitting), with Ezio in front or behind depending on who's lower
                   boolean ezHere = ezScene == SCENE_IGLOO;
                   boolean ezInBed = ezHere && !ezMoving && Math.abs(ezX - ROOM_BED_X) < 14 && Math.abs(ezY - ROOM_BED_Y - 2) < 10;
-                  if (ezHere && ezY < py) drawEzio(c, ezX, ezInBed ? ROOM_BED_Y + 2 : ezY, 1.15f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
-                  if (ezInBed && ezY < py) drawPetBed(c, ROOM_BED_X, ROOM_BED_Y + 7, 0.8f, true);
+                  boolean ezBehind = ezY < py || pEmote == E_PAT;     // you're patting him: your flipper goes on top
+                  if (ezHere && ezBehind) drawEzio(c, ezX, ezInBed ? ROOM_BED_Y + 2 : ezY, 1.15f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
+                  if (ezInBed && ezBehind) drawPetBed(c, ROOM_BED_X, ROOM_BED_Y + 7, 0.8f, true);
                   drawPlayer(c);
-                  if (ezHere && ezY >= py) drawEzio(c, ezX, ezInBed ? ROOM_BED_Y + 2 : ezY, 1.15f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
-                  if (ezInBed && ezY >= py) drawPetBed(c, ROOM_BED_X, ROOM_BED_Y + 7, 0.8f, true);
+                  if (ezHere && !ezBehind) drawEzio(c, ezX, ezInBed ? ROOM_BED_Y + 2 : ezY, 1.15f, ezFacing, ezMoving, ezSleeping, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
+                  if (ezInBed && !ezBehind) drawPetBed(c, ROOM_BED_X, ROOM_BED_Y + 7, 0.8f, true);
                   drawParts(c, true);
                   if (overlay == OV_NONE && "exit".equals(nearObject())) drawNameTag(c, 640, 712, "Outside");
+                  if (overlay == OV_NONE && "tv".equals(nearObject()) && emulatorApp() != null) drawNameTag(c, 260, 204, "Games");
 
                   String msg = null;
                   if (overlay == OV_NONE) {
@@ -5163,7 +5517,7 @@ jobs:
                       if (face == DOWN) { ex1 = -6.5f; ex2 = 6.5f; bx = 0; }
                       else if (face == LEFT) { ex1 = -7.5f; ex2 = -7.5f; bx = -1; }
                       else { ex1 = 7.5f; ex2 = 7.5f; bx = 1; }
-                      float eyeY = headY - 4;
+                      float eyeY = headY - 4 + (emote == E_PAT ? 3 : 0);     // looking down at Ezio while patting
                       if (blink) {
                           p.setStyle(Paint.Style.STROKE);
                           p.setStrokeWidth(2);
@@ -5635,25 +5989,27 @@ jobs:
                   c.clipPath(open);
                   w.setColor(0xff120d0b);
                   c.drawRect(oL, oTop, oR, oBot, w);
-                  // side walls (lit a little by the fire)
+                  // The firebox is built like a little vault: the side walls rise straight up to a "spring line",
+                  // and the curved ceiling starts exactly there, so walls and ceiling meet along one clean edge
+                  float sO = oTop + 140, sB = bTop + 75;                 // spring line at the front and at the back
                   Path side = new Path();
-                  side.moveTo(oL, oTop + 60); side.lineTo(bL, bTop + 40); side.lineTo(bL, bBot); side.lineTo(oL, oBot); side.close();
-                  w.setShader(new LinearGradient(oL, 0, bL, 0, 0xff2a1c16, 0xff3d2a20, Shader.TileMode.CLAMP));
+                  side.moveTo(oL, sO); side.lineTo(bL, sB); side.lineTo(bL, bBot); side.lineTo(oL, oBot); side.close();
+                  w.setShader(new LinearGradient(oL, 0, bL, 0, 0xff37251c, 0xff4a3226, Shader.TileMode.CLAMP));
                   c.drawPath(side, w);
-                  side.reset();
-                  side.moveTo(oR, oTop + 60); side.lineTo(bR, bTop + 40); side.lineTo(bR, bBot); side.lineTo(oR, oBot); side.close();
-                  w.setShader(new LinearGradient(oR, 0, bR, 0, 0xff2a1c16, 0xff3d2a20, Shader.TileMode.CLAMP));
-                  c.drawPath(side, w);
+                  Path sideR = new Path();
+                  sideR.moveTo(oR, sO); sideR.lineTo(bR, sB); sideR.lineTo(bR, bBot); sideR.lineTo(oR, oBot); sideR.close();
+                  w.setShader(new LinearGradient(oR, 0, bR, 0, 0xff37251c, 0xff4a3226, Shader.TileMode.CLAMP));
+                  c.drawPath(sideR, w);
                   // floor of the firebox
-                  side.reset();
-                  side.moveTo(bL, bBot); side.lineTo(bR, bBot); side.lineTo(oR, oBot); side.lineTo(oL, oBot); side.close();
+                  Path flr = new Path();
+                  flr.moveTo(bL, bBot); flr.lineTo(bR, bBot); flr.lineTo(oR, oBot); flr.lineTo(oL, oBot); flr.close();
                   w.setShader(new LinearGradient(0, bBot, 0, oBot, 0xff2b1d17, 0xff1a120f, Shader.TileMode.CLAMP));
-                  c.drawPath(side, w);
+                  c.drawPath(flr, w);
                   w.setShader(null);
                   // back wall with smaller bricks (it's further away)
                   Path back = new Path();
                   back.moveTo(bL, bBot);
-                  back.lineTo(bL, bTop + 40);
+                  back.lineTo(bL, sB);
                   rf.set(bL, bTop, bR, bTop + 150);
                   back.arcTo(rf, 180, 180, false);
                   back.lineTo(bR, bBot);
@@ -5671,20 +6027,22 @@ jobs:
                       for (float x = bL + (row % 2) * 24; x < bR; x += 48) c.drawLine(x, y, x, y + 22, w);
                   }
                   c.restore();
-                  // the ceiling of the firebox (lit warm by the fire), with the chimney's dark throat in the middle
+                  w.setStyle(Paint.Style.FILL);
+                  // the curved ceiling, from the front arch back to the back wall's arch
                   Path ceil = new Path();
-                  ceil.moveTo(oL, oTop + 60);
+                  ceil.moveTo(oL, sO);
                   rf.set(oL, oTop, oR, oTop + 280);
                   ceil.arcTo(rf, 180, 180, false);
-                  ceil.lineTo(oR, oTop + 60);
-                  ceil.lineTo(bR, bTop + 40);
+                  ceil.lineTo(bR, sB);
                   rf.set(bL, bTop, bR, bTop + 150);
                   ceil.arcTo(rf, 0, -180, false);
                   ceil.close();
-                  w.setShader(new LinearGradient(0, oTop, 0, bTop + 40, 0xff3b271e, 0xff5a3a2a, Shader.TileMode.CLAMP));
+                  w.setShader(new LinearGradient(0, oTop, 0, sB, 0xff37251c, 0xff52372a, Shader.TileMode.CLAMP));
                   c.drawPath(ceil, w);
                   w.setShader(null);
                   // the hole up into the chimney: black, fading out softly at its edges
+                  c.save();
+                  c.clipPath(ceil);
                   for (int k = 0; k < 6; k++) {
                       float f = k / 5f;
                       float hw = 120 - f * 55, top = oTop + 6, bot = bTop + 6 - f * 30;
@@ -5692,21 +6050,22 @@ jobs:
                       w.setColor(((int) (60 + f * 195)) << 24 | 0x050302);
                       c.drawRoundRect(rf, hw * 0.6f, 30, w);
                   }
-                  // bricks on the ceiling too, curving back toward the back wall like the side walls do,
-                  // and carrying on faintly over the dark hole up the chimney
-                  c.save();
-                  c.clipPath(ceil);
+                  c.restore();
+                  // mortar: the same lines run over the ceiling and down the side walls, so it's all one surface
                   w.setStyle(Paint.Style.STROKE);
                   w.setStrokeWidth(1.5f);
+                  final int BANDS = 6;
                   for (int pass = 0; pass < 2; pass++) {
+                      // pass 0: dark mortar everywhere; pass 1: faint warm lines so the bricks still show over the dark hole
                       w.setColor(pass == 0 ? 0xff1f150f : 0x38c08a62);
-                      for (int k = 1; k <= 6; k++) {
-                          float t0 = (k - 1) / 6f, t1 = k / 6f;
+                      c.save();
+                      c.clipPath(ceil);
+                      for (int k = 1; k <= BANDS; k++) {
+                          float t0 = (k - 1) / (float) BANDS, t1 = k / (float) BANDS;
                           float L0 = oL + (bL - oL) * t0, R0 = oR + (bR - oR) * t0, T0 = oTop + (bTop - oTop) * t0, H0 = 280 + (150 - 280) * t0;
                           float L1 = oL + (bL - oL) * t1, R1 = oR + (bR - oR) * t1, T1 = oTop + (bTop - oTop) * t1, H1 = 280 + (150 - 280) * t1;
                           rf.set(L1, T1, R1, T1 + H1);
                           c.drawArc(rf, 180, 180, false, w);
-                          // joints across this band of bricks, staggered from the band before
                           int nj = 11;
                           for (int j = 0; j < nj; j++) {
                               double ang = Math.PI + Math.PI * (j + 0.5 + (k % 2) * 0.5) / (nj + 0.5);
@@ -5715,18 +6074,32 @@ jobs:
                                          (L1 + R1) / 2 + cs * (R1 - L1) / 2, T1 + H1 / 2 + sn * H1 / 2, w);
                           }
                       }
-                  }
-                  w.setStyle(Paint.Style.FILL);
-                  c.restore();
-                  w.setStyle(Paint.Style.STROKE);
-                  w.setStrokeWidth(1.5f);
-                  // brick lines on the side walls, slanting toward the back
-                  w.setColor(0xff1f150f);
-                  for (int k = 1; k < 9; k++) {
-                      float t = k / 9f;
-                      float yo = oTop + 60 + (oBot - oTop - 60) * t, yb = bTop + 40 + (bBot - bTop - 40) * t;
-                      c.drawLine(oL, yo, bL, yb, w);
-                      c.drawLine(oR, yo, bR, yb, w);
+                      c.restore();
+                      if (pass == 1) break;
+                      // side walls: courses running back to the back wall, with the same band spacing at the top
+                      // so the ceiling's rows carry straight on down the walls
+                      for (int side2 = 0; side2 < 2; side2++) {
+                          float fx = side2 == 0 ? oL : oR, bx = side2 == 0 ? bL : bR;
+                          final int COURSES = 10;
+                          for (int j = 0; j <= COURSES; j++) {
+                              float u = j / (float) COURSES;
+                              float yo = sO + (oBot - sO) * u, yb = sB + (bBot - sB) * u;
+                              c.drawLine(fx, yo, bx, yb, w);
+                              if (j == COURSES) break;
+                              float yo2 = sO + (oBot - sO) * (j + 1) / COURSES, yb2 = sB + (bBot - sB) * (j + 1) / COURSES;
+                              for (int m = 0; m < BANDS; m++) {
+                                  float t = (m + 0.5f * (j % 2) + 0.25f) / BANDS;
+                                  if (t <= 0.02f || t >= 0.98f) continue;
+                                  float xj = fx + (bx - fx) * t;
+                                  c.drawLine(xj, yo + (yb - yo) * t, xj, yo2 + (yb2 - yo2) * t, w);
+                              }
+                          }
+                          // the corner where the side wall meets the back wall
+                          c.drawLine(bx, sB, bx, bBot, w);
+                      }
+                      // the spring line itself, where wall turns into ceiling
+                      c.drawLine(oL, sO, bL, sB, w);
+                      c.drawLine(oR, sO, bR, sB, w);
                   }
                   w.setStyle(Paint.Style.FILL);
                   c.restore();
@@ -5744,11 +6117,14 @@ jobs:
                   w.setShader(null);
                   w.setColor(0x22000000);
                   c.drawRect(0, FX_FLOOR_TOP, VW, FX_FLOOR_TOP + 9, w);              // shadow the step casts on the snow
-                  w.setShader(new LinearGradient(0, FX_HEARTH_TOP, 0, FX_HEARTH_FACE, 0xff6a615c, 0xff5b534f, Shader.TileMode.CLAMP));
-                  c.drawRect(0, FX_HEARTH_TOP, VW, FX_HEARTH_FACE, w);                 // top surface
+                  // top surface: a solid, lighter stone slab, so it reads as a flat surface you could sit things on
+                  w.setShader(new LinearGradient(0, FX_HEARTH_TOP, 0, FX_HEARTH_FACE, 0xff8f8580, 0xffa1978f, Shader.TileMode.CLAMP));
+                  c.drawRect(0, FX_HEARTH_TOP, VW, FX_HEARTH_FACE, w);
                   w.setShader(null);
-                  w.setColor(0xff7a716b);
-                  c.drawRect(0, FX_HEARTH_TOP, VW, FX_HEARTH_TOP + 3, w);              // back edge catching the fire light
+                  w.setColor(0xff6b625d);
+                  c.drawRect(0, FX_HEARTH_TOP, VW, FX_HEARTH_TOP + 3, w);              // back edge
+                  w.setColor(0x22000000);
+                  for (float x = 215; x < VW; x += 210) c.drawRect(x, FX_HEARTH_TOP + 3, x + 2, FX_HEARTH_FACE, w);   // slab seams
                   w.setColor(0xff4a4441);
                   c.drawRect(0, FX_HEARTH_FACE, VW, FX_FLOOR_TOP, w);                  // front face
                   w.setColor(0xff6c635e);
@@ -5875,6 +6251,40 @@ jobs:
                       c.drawPath(path, p);
                   }
 
+                  // burnt flakes: a glowing edge at first, then grey ash, crumpling smaller as it flies off
+                  for (int k = 0; k < ashX.length; k++) {
+                      if (ashLife[k] <= 0) continue;
+                      float f = ashLife[k] / ashMax[k];          // 1 just broken off -> 0 gone
+                      float sz = ashSize[k] * (0.35f + 0.65f * f);
+                      float crumple = 0.55f + 0.45f * (float) Math.abs(Math.sin(time * 4 + ashSeed[k] * 9));
+                      c.save();
+                      c.translate(ashX[k], ashY[k]);
+                      c.rotate(ashRot[k]);
+                      c.scale(1, crumple);
+                      path.reset();
+                      for (int v = 0; v < 6; v++) {
+                          double ang = Math.PI * 2 * v / 6;
+                          float rr = sz * (0.65f + 0.35f * (float) Math.sin(ashSeed[k] * 20 + v * 2.3f));
+                          float vx = (float) Math.cos(ang) * rr, vy = (float) Math.sin(ang) * rr;
+                          if (v == 0) path.moveTo(vx, vy); else path.lineTo(vx, vy);
+                      }
+                      path.close();
+                      int alpha = (int) (255 * Math.min(1, f * 1.6f));
+                      int body = blend(0xff3b3532, 0xff8a837e, 1 - f);
+                      p.setColor((alpha << 24) | (body & 0xffffff));
+                      c.drawPath(path, p);
+                      if (f > 0.45f) {
+                          // still-burning edge
+                          p.setStyle(Paint.Style.STROKE);
+                          p.setStrokeWidth(1.6f);
+                          int ea = (int) (alpha * (f - 0.45f) / 0.55f);
+                          p.setColor((ea << 24) | 0xffa726);
+                          c.drawPath(path, p);
+                          p.setStyle(Paint.Style.FILL);
+                      }
+                      c.restore();
+                  }
+
                   // front log sits in front of the flames, hiding where they start
                   drawLog(c, 640, 598, 330, 40, -3, flick);
 
@@ -5901,7 +6311,8 @@ jobs:
                   drawPetBed(c, FX_BED, FX_BED_Y, 2.2f, false);
                   if (ezScene == SCENE_IGLOO) {
                       boolean onBed = Math.abs(fxX - FX_BED) < 8 && (fxState == 0 || fxState == 1) && fxHopT <= 0 && fxOnHearth();
-                      drawEzio(c, fxX, onBed ? FX_BED_Y - 13 : fxY, 2.4f, fxFacing, fxState == 2 || fxHopT > 0, fxState == 1, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
+                      if (fxState == 4) drawEzioSprawl(c, fxX, fxY, 2.4f, fxFacing, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
+                      else drawEzio(c, fxX, onBed ? FX_BED_Y - 13 : fxY, 2.4f, fxFacing, fxState == 2 || fxHopT > 0, fxState == 1, ezPhase, ezBlinkT > 0 || ezHappyT > 0, season);
                       if (onBed) drawPetBed(c, FX_BED, FX_BED_Y, 2.2f, true);
                   }
 
@@ -5959,7 +6370,7 @@ jobs:
                   }
                   String np = null;
                   if (nowDisc != null) {
-                      String nt = ytStepping ? "Shuffling…" : nowTitle == null || nowTitle.isEmpty() ? nowDisc.name : nowTitle;
+                      String nt = ytStepping || ytShuffling ? "Shuffling…" : nowTitle == null || nowTitle.isEmpty() ? nowDisc.name : nowTitle;
                       np = "♪  " + (radioBusy() ? "" : "Paused · ") + nt;
                   }
 
@@ -6257,7 +6668,7 @@ jobs:
               void drawPlayerPanel(Canvas c) {
                   c.drawColor(0x33000000);
                   Disc d = nowDisc;
-                  float w = 520, h = 214;
+                  float w = 470, h = 214;
                   float l = (VW - w) / 2, t = VH - h - 14;
                   rf.set(l, t, l + w, t + h);
                   p.setColor(0xc4161d29);
@@ -6265,7 +6676,7 @@ jobs:
                   boolean playing = d != null && radioBusy();
 
                   // volume: a tall slider down the whole left side
-                  float vx = l + 32, vTop = t + 44, vBot = t + h - 34;
+                  float vx = l + 30, vTop = t + 44, vBot = t + h - 34;
                   p.setColor(0xff263142);
                   rf.set(vx - 4, vTop, vx + 4, vBot);
                   c.drawRoundRect(rf, 4, 4, p);
@@ -6283,7 +6694,7 @@ jobs:
                   c.drawText(Math.round(cdVolume * 100) + "%", vx, t + h - 14, tp);
 
                   // the spinning disc
-                  float dcx = l + 124, dcy = t + 76;
+                  float dcx = l + 112, dcy = t + 76;
                   if (d != null) {
                       c.save();
                       c.rotate(playing ? (time * 140) % 360 : 0, dcx, dcy);
@@ -6292,20 +6703,20 @@ jobs:
                   }
 
                   // song info and progress
-                  float tx = l + 200, tr = l + w - 22;
+                  float tx = l + 184, tr = l + w - 20;
                   tp.setTextAlign(Paint.Align.LEFT);
                   tp.setTextSize(23);
                   tp.setColor(0xffffffff);
                   c.drawText(fitText(d != null ? d.name : "No disc", tr - tx - 76), tx, t + 46, tp);
                   tp.setTextSize(16);
                   tp.setColor(0xffcfd8dc);
-                  String nt = ytStepping ? "Shuffling…" : nowTitle == null ? "" : nowTitle;
+                  String nt = ytStepping || ytShuffling ? "Shuffling…" : nowTitle == null ? "" : nowTitle;
                   c.drawText(fitText(nt, tr - tx), tx, t + 71, tp);
                   tp.setTextSize(13);
                   tp.setColor(playing ? 0xffa5d6a7 : 0xffffcc80);
                   c.drawText((playing ? "Playing" : "Paused") + (nowYT ? " in SmartTube" : ""), tx, t + 91, tp);
                   long[] pr = songProgress();
-                  if (pr != null && pr[1] > 0 && !ytStepping) {
+                  if (pr != null && pr[1] > 0 && !ytStepping && !ytShuffling) {
                       float bl = tx, br = tr - 84, byy = t + 114;
                       float f = Math.max(0, Math.min(1, pr[0] / (float) pr[1]));
                       p.setColor(0xff263142);
@@ -6322,24 +6733,27 @@ jobs:
                   }
 
                   // the row of buttons along the bottom, centred; the selected one gets a box around it
-                  float by = t + h - 34, gap = 50;
-                  float rowMid = l + w / 2 + 16;
+                  float by = t + h - 34, gap = 44;
+                  float rowMid = l + w / 2 + 14;
                   float bx0 = rowMid - gap * (PLAYER_BTNS.length - 1) / 2f;
                   for (int i = 0; i < PLAYER_BTNS.length; i++) {
                       float bx = bx0 + i * gap;
                       boolean sel = i == playerSel && playerRow == 0;
                       if (sel) {
                           p.setColor(0xff2e7dbd);
-                          rf.set(bx - 21, by - 21, bx + 21, by + 21);
-                          c.drawRoundRect(rf, 9, 9, p);
+                          rf.set(bx - 17, by - 17, bx + 17, by + 17);
+                          c.drawRoundRect(rf, 7, 7, p);
                       }
-                      tp.setTextAlign(Paint.Align.CENTER);
-                      tp.setTextSize(21);
-                      tp.setColor(0xffffffff);
-                      c.drawText(PLAYER_BTNS[i], bx, by + 7, tp);
-                      if (i == 3 && shuffleOn) {
+                      if (i == 6) drawBinderIcon(c, bx, by, 1f);
+                      else {
+                          tp.setTextAlign(Paint.Align.CENTER);
+                          tp.setTextSize(20);
+                          tp.setColor(0xffffffff);
+                          c.drawText(PLAYER_BTNS[i], bx, by + 7, tp);
+                      }
+                      if (i == 4 && shuffleOn) {
                           p.setColor(0xff76ff03);
-                          c.drawCircle(bx, by + 16, 2.6f, p);
+                          c.drawCircle(bx, by + 13, 2.4f, p);
                       }
                   }
                   tp.setTextAlign(Paint.Align.CENTER);
@@ -6355,6 +6769,50 @@ jobs:
                   tp.setTextSize(11);
                   tp.setColor(0xff90a4ae);
                   c.drawText("Back to close", l + w - 22, t + 22, tp);
+              }
+
+              /**
+               * A tiny ring-binder CD folder: spine on the left, the cover swung open a little, the clear
+               * plastic sleeves fanning out, and a silver CD on the front cover.
+               */
+              void drawBinderIcon(Canvas c, float x, float y, float s) {
+                  c.save();
+                  c.translate(x, y);
+                  c.scale(s, s);
+                  // back cover
+                  p.setColor(0xff1f2733);
+                  rf.set(-11, -12, 11, 12);
+                  c.drawRect(rf, p);
+                  // clear plastic sleeves, each opened a little less than the cover
+                  float[] fr = {0.92f, 0.8f, 0.7f};
+                  int[] sc = {0xffb9cad8, 0xffd6e4ef, 0xffc4d4e1};
+                  for (int k = 0; k < 3; k++) {
+                      float xr = -10 + 21 * fr[k];
+                      path.reset();
+                      path.moveTo(-10, -11); path.lineTo(xr, -12.2f); path.lineTo(xr, 12.2f); path.lineTo(-10, 11); path.close();
+                      p.setColor(sc[k]);
+                      c.drawPath(path, p);
+                  }
+                  // front cover swung open toward you: narrower, its free edge a bit taller because it's closer
+                  float xr = -11 + 22 * 0.55f;
+                  path.reset();
+                  path.moveTo(-11, -12); path.lineTo(xr, -14); path.lineTo(xr, 14); path.lineTo(-11, 12); path.close();
+                  p.setColor(0xff2b3646);
+                  c.drawPath(path, p);
+                  // silver CD on the cover, squashed to match the angle
+                  float cx = (-11 + xr) / 2 + 0.5f;
+                  p.setColor(0xffcfd8dc);
+                  c.drawOval(cx - 4.6f, -7.6f, cx + 4.6f, 7.6f, p);
+                  p.setColor(0xffeceff1);
+                  c.drawOval(cx - 2.6f, -4.4f, cx + 0.6f, 0.4f, p);
+                  p.setColor(0xff2b3646);
+                  c.drawOval(cx - 1.1f, -1.8f, cx + 1.1f, 1.8f, p);
+                  // spine with its rings
+                  p.setColor(0xff111821);
+                  c.drawRect(-13, -13, -9, 13, p);
+                  p.setColor(0xffb0bec5);
+                  for (int k = -1; k <= 1; k++) c.drawCircle(-11, k * 7, 1.6f, p);
+                  c.restore();
               }
 
               /** Shortens text with "…" so it fits in maxW pixels at the current text size. */
@@ -6611,31 +7069,46 @@ jobs:
                   return out;
               }
 
+              /** A soft, airy swish (darker than before, no hiss on top). */
               static float[] whoosh() {
                   Random r = new Random(5);
-                  int n = (int) (RATE * 0.28);
+                  int n = (int) (RATE * 0.26);
                   float[] out = new float[n];
-                  float lp = 0;
+                  float lp = 0, lp2 = 0;
                   for (int i = 0; i < n; i++) {
                       float t = i / (float) n;
-                      float cut = 0.04f + 0.3f * (float) Math.sin(Math.PI * t);
+                      float cut = 0.015f + 0.09f * (float) Math.sin(Math.PI * t);
                       lp += cut * ((r.nextFloat() * 2 - 1) - lp);
-                      out[i] = lp * (float) Math.sin(Math.PI * t) * 0.7f;
+                      lp2 += cut * (lp - lp2);
+                      out[i] = lp2 * (float) Math.pow(Math.sin(Math.PI * t), 1.5) * 1.6f;
                   }
                   return out;
               }
 
+              /** A muffled "pff" of soft snow: a low thump with a little crunch, nothing bright or ringing. */
               static float[] splat() {
                   Random r = new Random(9);
-                  int n = (int) (RATE * 0.14);
+                  int n = (int) (RATE * 0.2);
                   float[] out = new float[n];
-                  float lp = 0;
+                  float lp = 0, lp2 = 0;
+                  double ph = 0;
                   for (int i = 0; i < n; i++) {
                       float t = i / (float) n;
-                      lp += 0.18f * ((r.nextFloat() * 2 - 1) - lp);
-                      float env = (float) (Math.min(1, t * 60) * Math.pow(1 - t, 3));
-                      out[i] = lp * env * 1.1f;
+                      // dark, double-filtered noise burst
+                      lp += 0.09f * ((r.nextFloat() * 2 - 1) - lp);
+                      lp2 += 0.09f * (lp - lp2);
+                      float env = (float) (Math.min(1, t * 80) * Math.pow(1 - t, 4));
+                      // low thump that drops in pitch
+                      ph += 2 * Math.PI * (110 - 50 * t) / RATE;
+                      float thump = (float) Math.sin(ph) * (float) Math.pow(1 - t, 6) * 0.35f;
+                      // a few soft grains of crunch
+                      float grain = r.nextFloat() < 0.02f * (1 - t) ? (r.nextFloat() - 0.5f) * 0.25f : 0;
+                      out[i] = (lp2 * 2.2f + grain) * env + thump;
                   }
+                  // smooth the grains so they're crunchy, not clicky
+                  float sm = 0;
+                  for (int i = 0; i < n; i++) { sm += 0.3f * (out[i] - sm); out[i] = sm; }
+                  normalize(out, 0.7f);
                   return out;
               }
 
