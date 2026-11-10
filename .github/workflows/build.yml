@@ -343,7 +343,7 @@ jobs:
 
               static class Ball {
                   float x, y, vx, vy, t, dur;
-                  boolean fromPlayer;
+                  boolean fromPlayer, toy;
                   AppPeng owner;
               }
 
@@ -421,6 +421,8 @@ jobs:
               float cdVolume = 1f;
               boolean shuffleOn;
               volatile boolean ytSawDiscSong, ytShuffleSent;
+              volatile String ytLastTitle;
+              volatile long ytUserSkipAt, ytJumpUntil;
               int playerRow;
               volatile long returnDeadline;
               int returnHits;
@@ -441,7 +443,9 @@ jobs:
               int ezScene = SCENE_ISLAND, ezFacing = RIGHT;
               float ezX = BED_X, ezY = BED_Y + 2, ezTX = BED_X, ezTY = BED_Y + 2;
               float ezWait = 3, ezPhase, ezBlinkT, ezNextBlink = 3, ezSleepT, ezVisitT = -1, ezReturnT = -1, ezStayT, ezHappyT;
-              boolean ezGoBed, ezLeaving;
+              boolean ezGoBed, ezLeaving, ezRun;
+              AppPeng ezPeng, ezStarePeng;
+              float ezStareT;
 
               // Scene + overlays
               int scene = SCENE_ISLAND, pendingScene = -1;
@@ -480,7 +484,7 @@ jobs:
               float fireHintT;
               boolean bellyIcons;
               float[] emberX, emberY, emberPh;
-              Bitmap fireBg;
+              Bitmap fireBg, glowBmp;
               Path fireArch;
               final Map<String, AppPeng> byPkg = new HashMap<>();
               float[] waveX, waveY, wavePh;
@@ -993,6 +997,19 @@ jobs:
                   } catch (Exception ignored) { }
               }
 
+              /** Where a song title sits in the disc's song list, or -1. */
+              static int trackIndex(Disc d, String title) {
+                  ArrayList<String[]> tr = d.tracks;
+                  if (tr == null) return -1;
+                  String n = normTitle(title);
+                  for (int i = 0; i < tr.size(); i++) if (normTitle(tr.get(i)[1]).equals(n)) return i;
+                  for (int i = 0; i < tr.size(); i++) {
+                      String m = normTitle(tr.get(i)[1]);
+                      if (n.length() > 6 && m.length() > 6 && (m.contains(n) || n.contains(m))) return i;
+                  }
+                  return -1;
+              }
+
               static String normTitle(String t) {
                   return t == null ? "" : t.toLowerCase(Locale.US).replaceAll("[^a-z0-9]", "");
               }
@@ -1055,6 +1072,7 @@ jobs:
                   if (nowDisc == null) return;
                   if (nowYT) {
                       // SmartTube is playing the playlist, so its own next/previous stay on the disc
+                      ytUserSkipAt = System.currentTimeMillis();
                       MediaController mc = smartTubeSession();
                       boolean done = false;
                       if (mc != null) {
@@ -1148,6 +1166,7 @@ jobs:
                   nowTitle = title != null ? title : d.name;
                   ytSawDiscSong = false;
                   ytShuffleSent = false;
+                  ytLastTitle = null;
                   updateMusic();
                   if (d.tracks == null) new Thread(() -> fetchTracks(d), "island-tracks").start();
                   int index = 1;
@@ -1406,7 +1425,26 @@ jobs:
                                   if (cur != null && stPlaying && title != null && !title.isEmpty() && cur.tracks != null) {
                                       if (onDisc(cur, title)) {
                                           ytSawDiscSong = true;
-                                          if (shuffleOn && !ytShuffleSent) { ytShuffleSent = true; sendShuffleToSmartTube(true); }
+                                          // Shuffle: when SmartTube moves on to the next song by itself, jump to a random one instead
+                                          if (shuffleOn && ytLastTitle != null && !title.equals(ytLastTitle)
+                                                  && now - ytUserSkipAt > 6000 && now > ytJumpUntil) {
+                                              int cur2 = trackIndex(cur, title);
+                                              int n2 = cur.tracks.size();
+                                              if (cur2 >= 0 && n2 > 2) {
+                                                  int target = cur2;
+                                                  while (target == cur2) target = rnd.nextInt(n2);
+                                                  final int delta = target - cur2;
+                                                  final MediaController jm = mc;
+                                                  ytJumpUntil = now + 4000 + Math.abs(delta) * 700L;
+                                                  new Thread(() -> {
+                                                      for (int k = 0; k < Math.abs(delta); k++) {
+                                                          try { Thread.sleep(450); } catch (InterruptedException ignored) { }
+                                                          try { if (delta > 0) jm.getTransportControls().skipToNext(); else jm.getTransportControls().skipToPrevious(); } catch (Exception ignored) { }
+                                                      }
+                                                  }, "island-shuffle").start();
+                                              }
+                                          }
+                                          if (now > ytJumpUntil) ytLastTitle = title;
                                       } else if (ytSawDiscSong) {
                                           // SmartTube ran past the last song into its own suggestions: the disc is over
                                           try { mc.getTransportControls().stop(); } catch (Exception ignored) { }
@@ -1926,9 +1964,9 @@ jobs:
                   c.drawOval(640 - 110, 478, 640 + 110, 542, w);
                   // Chimney: stone column running from the mantle up through the ceiling
                   w.setColor(0xff78909c);
-                  c.drawRect(576, 0, 704, 112, w);
+                  c.drawRect(576, 0, 704, 124, w);
                   w.setColor(0xff90a4ae);
-                  for (int row = 0; row < 4; row++) {
+                  for (int row = 0; row < 5; row++) {
                       float sy = 4 + row * 27;
                       float off = (row % 2) * 30;
                       for (float sx = 580 - off; sx < 700; sx += 60) {
@@ -1954,11 +1992,14 @@ jobs:
                           c.drawRoundRect(rf, 6, 6, w);
                       }
                   }
+                  // mantle sits just above the opening, like in the fireplace view
+                  w.setColor(0x44000000);
+                  c.drawRect(512, 178, 768, 184, w);
                   w.setColor(0xff5d4037);
-                  rf.set(500, 102, 780, 132);
+                  rf.set(500, 150, 780, 180);
                   c.drawRoundRect(rf, 6, 6, w);
                   w.setColor(0xff6d4c41);
-                  c.drawRect(504, 104, 776, 108, w);
+                  c.drawRect(504, 152, 776, 156, w);
                   w.setColor(0xff1c1c1c);
                   rf.set(570, 190, 710, 300);
                   c.drawArc(rf, 180, 180, true, w);
@@ -1968,7 +2009,7 @@ jobs:
                   rf.set(588, 280, 692, 296);
                   c.drawRoundRect(rf, 8, 8, w);
                   // Family nameplate sitting on the mantle
-                  drawNameplate(c, w, 640, 117, 0.85f);
+                  drawNameplate(c, w, 640, 166, 0.8f);
                   // TV Settings console (left)
                   w.setColor(0x33000000);
                   c.drawOval(170, 395, 350, 425, w);
@@ -2500,7 +2541,9 @@ jobs:
                       b.y += b.vy * dt;
                       float z = ballZ(b);
                       boolean done = false;
-                      if (b.fromPlayer) {
+                      if (b.toy) {
+                          // a snowball tossed for Ezio to chase: it doesn't hit anyone
+                      } else if (b.fromPlayer) {
                           for (AppPeng a : list) {
                               if (z < 75 && dist2(a.x, a.y - 10, b.x, b.y) < 30 * 30) {
                                   a.hitT = 2.2f;
@@ -2604,7 +2647,7 @@ jobs:
                       a.moving = false;
                       float roll = rnd.nextFloat();
                       if (roll < dt * 0.06f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
-                      else if (roll < dt * 0.12f) tryStartChat(a, list);
+                      else if (roll < dt * 0.2f) tryStartChat(a, list);
                       return;
                   }
                   if (a.chatWith != null) {
@@ -2644,15 +2687,15 @@ jobs:
               }
 
               void tryStartChat(AppPeng a, List<AppPeng> list) {
-                  AppPeng best = null;
-                  float bd = 320 * 320;
+                  // Pick a random free penguin from a wide area, so different penguins get to meet
+                  ArrayList<AppPeng> pool = new ArrayList<>();
                   for (AppPeng o : list) {
-                      if (o == a || o.chatWith != null || o.emote != E_NONE) continue;
+                      if (o == a || o.chatWith != null || o.emote != E_NONE || o.hugWalk) continue;
                       if (dist2(o.x, o.y, px, py) < 160 * 160) continue;
-                      float d = dist2(o.hx, o.hy, a.hx, a.hy);
-                      if (d < bd) { bd = d; best = o; }
+                      if (dist2(o.x, o.y, a.x, a.y) < 650 * 650) pool.add(o);
                   }
-                  if (best == null) return;
+                  if (pool.isEmpty()) return;
+                  AppPeng best = pool.get(rnd.nextInt(pool.size()));
                   AppPeng o = best;
                   float mx = (a.x + o.x) / 2, my = (a.y + o.y) / 2;
                   AppPeng leftOne = a.x <= o.x ? a : o, rightOne = leftOne == a ? o : a;
@@ -2681,25 +2724,25 @@ jobs:
               void updateFire(float dt) {
                   fireHintT += dt;
                   // A few stray sparks drifting up
-                  if (rnd.nextFloat() < dt * 2.5f) spark(640 + (rnd.nextFloat() - 0.5f) * 380, 560, false);
+                  if (rnd.nextFloat() < dt * 2.5f) spark(640 + (rnd.nextFloat() - 0.5f) * 280, 560, false);
                   // Every so often a log pops: a quick snappy burst of sparks
                   if (rnd.nextFloat() < dt * 0.5f) {
-                      float x = 640 + (rnd.nextFloat() - 0.5f) * 300;
+                      float x = 640 + (rnd.nextFloat() - 0.5f) * 220;
                       int count = 6 + rnd.nextInt(12);
-                      for (int i = 0; i < count; i++) spark(x, 575, true);
+                      for (int i = 0; i < count; i++) spark(x, 572, true);
                   }
-                  // A thin haze of smoke: starts hidden behind the flames, fades in, drifts up the flue
-                  if (rnd.nextFloat() < dt * 2.6f) {
-                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 180, 520 + rnd.nextFloat() * 50, false);
-                      q.vx = (rnd.nextFloat() - 0.5f) * 12; q.vy = -46 - rnd.nextFloat() * 16;
-                      q.max = q.life = 6.5f; q.size = 16 + rnd.nextFloat() * 8; q.grow = 7f;
+                  // Smoke: wide and soft down by the fire, narrowing to a point as it's drawn up the chimney
+                  if (rnd.nextFloat() < dt * 3f) {
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 300, 540 + rnd.nextFloat() * 40, false);
+                      q.vx = 0; q.vy = -40 - rnd.nextFloat() * 14;
+                      q.max = q.life = 6f; q.size = 34 + rnd.nextFloat() * 14; q.grow = 1f;
                       q.color = 0xff2b2522;
                       q.seed = rnd.nextFloat() * 6.28f;
-                      q.flue = true; q.flueX = 640; q.flueTop = 205;
+                      q.flue = true; q.flueX = 640; q.flueTop = 285;
                   }
                   // Bigger embers breaking off the flames: some rise away, some just fade, some wander about
                   if (rnd.nextFloat() < dt * 2.2f) {
-                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 260, 340 + rnd.nextFloat() * 90, false);
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 200, 420 + rnd.nextFloat() * 80, false);
                       q.size = 4 + rnd.nextFloat() * 5;
                       q.color = rnd.nextBoolean() ? 0xffffa726 : 0xffffcc80;
                       q.seed = rnd.nextFloat() * 6.28f;
@@ -2707,7 +2750,7 @@ jobs:
                       if (kind < 0.35f) {            // rises up the chimney
                           q.vx = (rnd.nextFloat() - 0.5f) * 30; q.vy = -80 - rnd.nextFloat() * 50;
                           q.max = q.life = 2f + rnd.nextFloat() * 1.2f; q.grow = -1.2f;
-                          q.flue = true; q.flueX = 640; q.flueTop = 175;
+                          q.flue = true; q.flueX = 640; q.flueTop = 280;
                       } else if (kind < 0.65f) {     // fades out where it is
                           q.vx = (rnd.nextFloat() - 0.5f) * 16; q.vy = -18 - rnd.nextFloat() * 14;
                           q.max = q.life = 0.5f + rnd.nextFloat() * 0.5f; q.grow = -3f;
@@ -2737,7 +2780,7 @@ jobs:
                       q.g = 20;
                       q.max = q.life = 1.2f + rnd.nextFloat() * 1.5f;
                       q.size = 1.4f + rnd.nextFloat() * 1.4f;
-                      q.flue = true; q.flueX = 640; q.flueTop = 175;
+                      q.flue = true; q.flueX = 640; q.flueTop = 280;
                   }
                   q.color = rnd.nextBoolean() ? 0xffffe082 : 0xffffab40;
               }
@@ -2861,8 +2904,8 @@ jobs:
                       if (folderClosing) return;
                       int n = discs.size();
                       if (back) { closeFolder(nowDisc != null ? this::openPlayer : null); return; }
-                      if (n == 0) return;
-                      folderSel = Math.max(0, Math.min(n - 1, folderSel));
+                      int total = folderSlots();
+                      folderSel = Math.max(0, Math.min(total - 1, folderSel));
                       int page = folderSel / 8, slot = folderSel % 8;
                       int col = (slot % 4) % 2 + (slot >= 4 ? 2 : 0), row = (slot % 4) / 2;
                       int target = -1;
@@ -2870,11 +2913,14 @@ jobs:
                       else if (code == KeyEvent.KEYCODE_DPAD_LEFT) target = col > 0 ? slotIndex(page, col - 1, row) : (page > 0 ? slotIndex(page - 1, 3, row) : -1);
                       else if (code == KeyEvent.KEYCODE_DPAD_DOWN && row == 0) target = slotIndex(page, col, 1);
                       else if (code == KeyEvent.KEYCODE_DPAD_UP && row == 1) target = slotIndex(page, col, 0);
-                      if (target >= n && target / 8 > page) target = n - 1;   // jump to the last disc on the next page
-                      if (target >= 0 && target < n && target != folderSel) {
+                      if (target >= 0 && target < total && target != folderSel) {
                           boolean flip = target / 8 != page;
                           folderSel = target;
                           play(flip ? S_WHOOSH : S_TICK, flip ? 0.35f : 0.35f, flip ? 1.6f : 1.05f);
+                          return;
+                      }
+                      if (folderSel >= n) {
+                          if (ok && !repeat) play(S_TICK, 0.3f, 0.7f);   // empty sleeve
                           return;
                       }
                       if (ok && !repeat) {
@@ -3169,6 +3215,23 @@ jobs:
                   ezNextBlink -= dt;
                   if (ezNextBlink <= 0) { ezBlinkT = 0.15f; ezNextBlink = 2.5f + rnd.nextFloat() * 4; }
                   ezBlinkT = Math.max(0, ezBlinkT - dt);
+                  if (ezStareT > 0) {
+                      // Slow blinks during a stare-off: Ezio first, the penguin a beat later
+                      ezStareT -= dt;
+                      float t = 3.4f - ezStareT;
+                      boolean ezClosed = (t > 0.9f && t < 1.45f) || (t > 2.3f && t < 2.85f);
+                      boolean pgClosed = (t > 1.15f && t < 1.7f) || (t > 2.45f && t < 3.0f);
+                      ezNextBlink = Math.max(ezNextBlink, 1f);
+                      if (ezClosed) ezBlinkT = 0.05f;
+                      AppPeng a = ezStarePeng;
+                      if (a != null) {
+                          a.facing = faceToward(a.x, a.y, ezX, ezY);
+                          a.nextBlink = Math.max(a.nextBlink, 1f);
+                          if (pgClosed) a.blinkT = 0.05f;
+                          a.wait = Math.max(a.wait, 0.5f);
+                      }
+                      if (ezStareT <= 0) ezStarePeng = null;
+                  }
 
                   if (ezScene != ps) {
                       // Off-screen: he might show up in your scene
@@ -3197,6 +3260,8 @@ jobs:
                   ezMoving = false;
                   if (ezFollow) {
                       ezSleeping = false;
+                      ezPeng = null;
+                      ezRun = false;
                       float behind = facing == LEFT ? 55 : facing == RIGHT ? -55 : (ezX < px ? -45 : 45);
                       float tx = px + behind, ty = py + (facing == UP ? 40 : 8);
                       float dx = tx - ezX, dy = ty - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
@@ -3221,9 +3286,64 @@ jobs:
                       return;
                   }
                   if (ezWait > 0) { ezWait -= dt; return; }
+                  if (ezPeng != null && !inside) {
+                      // keep heading for the penguin he picked
+                      ezTX = ezPeng.x + (ezX < ezPeng.x ? -34 : 34);
+                      ezTY = ezPeng.y + 4;
+                  }
                   float dx = ezTX - ezX, dy = ezTY - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
                   if (d > 3) {
-                      ezStep(dx / d, dy / d, Math.min(d, 95 * dt), inside);
+                      ezStep(dx / d, dy / d, Math.min(d, (ezRun ? 240 : 95) * dt), inside);
+                      return;
+                  }
+                  if (ezRun) {
+                      // caught the snowball!
+                      ezRun = false;
+                      ezHappyT = 1.2f;
+                      ezWait = 2 + rnd.nextFloat() * 2;
+                      splat(ezX + (ezFacing == LEFT ? -12 : 12), ezY - 6);
+                      return;
+                  }
+                  if (ezPeng != null && !inside) {
+                      AppPeng a = ezPeng;
+                      ezPeng = null;
+                      ezFacing = a.x < ezX ? LEFT : RIGHT;
+                      a.facing = faceToward(a.x, a.y, ezX, ezY);
+                      a.wait = 2.5f;
+                      float roll = rnd.nextFloat();
+                      if (roll < 0.4f) {
+                          // a pat on the head
+                          npcEmote(a, E_WAVE, 1.6f, 0);
+                          ezHappyT = 1.8f;
+                          ezWait = 2.5f;
+                          play(S_CHIRP, 0.12f, 0.6f);
+                      } else if (roll < 0.75f) {
+                          // the penguin tosses a snowball and Ezio runs after it
+                          double ang = Math.atan2(a.y - ezY, a.x - ezX) + (rnd.nextDouble() - 0.5) * 1.6;
+                          float lx = a.x + (float) Math.cos(ang) * 230, ly = a.y + (float) Math.sin(ang) * 140;
+                          float ex = (lx - CX) / (RX - 60), ey = (ly - CY) / (RY - 60);
+                          float e = ex * ex + ey * ey;
+                          if (e > 1) { float k = (float) (1 / Math.sqrt(e)); lx = CX + (lx - CX) * k; ly = CY + (ly - CY) * k; }
+                          a.facing = faceToward(a.x, a.y, lx, ly);
+                          npcEmote(a, E_THROW, 0.45f, 0);
+                          Ball b = new Ball();
+                          b.x = a.x; b.y = a.y;
+                          b.dur = 0.75f;
+                          b.vx = (lx - a.x) / b.dur; b.vy = (ly - a.y) / b.dur;
+                          b.toy = true;
+                          b.owner = a;
+                          balls.add(b);
+                          play(S_WHOOSH, 0.3f, 1.4f);
+                          ezTX = lx; ezTY = ly;
+                          ezRun = true;
+                          ezWait = 0.3f;
+                      } else {
+                          // a stare-off, with slow, deliberate blinks
+                          ezWait = 3.4f;
+                          a.wait = 3.8f;
+                          ezStareT = 3.4f;
+                          ezStarePeng = a;
+                      }
                       return;
                   }
                   // Arrived somewhere
@@ -3241,6 +3361,16 @@ jobs:
                       return;
                   }
                   ezWait = 2 + rnd.nextFloat() * 4;
+                  if (!inside && rnd.nextFloat() < 0.3f) {
+                      AppPeng best = null;
+                      float bd = 380 * 380;
+                      for (AppPeng a : apps) {
+                          if (a.emote != E_NONE || a.chatWith != null || a.hugWalk) continue;
+                          float dd = dist2(a.x, a.y, ezX, ezY);
+                          if (dd < bd && rnd.nextFloat() < 0.6f) { bd = dd; best = a; }
+                      }
+                      if (best != null) { ezPeng = best; return; }
+                  }
                   if (inside) {
                       ezTX = 520 + rnd.nextFloat() * 240; ezTY = 460 + rnd.nextFloat() * 70;
                   } else if (rnd.nextFloat() < 0.3f) {
@@ -3496,6 +3626,11 @@ jobs:
               }
 
               // ================================================================== CD folder, player and song lists
+
+              /** The folder always has at least 6 pages of sleeves you can flip through, empty or not. */
+              int folderSlots() {
+                  return Math.max(48, ((discs.size() + 7) / 8) * 8);
+              }
 
               static int slotIndex(int page, int col, int row) {
                   return page * 8 + (col >= 2 ? 4 : 0) + row * 2 + (col % 2);
@@ -3824,14 +3959,16 @@ jobs:
                       if (q.grow > 0) a = (int) (a * 0.5f);     // smoke is see-through
                       int col = (a << 24) | (q.color & 0xffffff);
                       if (!q.world && q.grow > 0) {
-                          // fireplace smoke: big soft puffs, so faint they blend into one drifting haze
+                          // fireplace smoke: soft-edged puffs, wide at the bottom, squeezed thinner as they rise
                           float fadeIn = Math.min(1, q.age / 1.5f);
-                          int sa = (int) (a * 0.22f * fadeIn);
-                          float sx = q.x + (float) Math.sin(time * 0.9f + q.seed) * 10;
-                          p.setColor((sa << 24) | (q.color & 0xffffff));
-                          c.drawCircle(sx, q.y, q.size, p);
-                          p.setColor(((sa / 2) << 24) | (q.color & 0xffffff));
-                          c.drawCircle(sx, q.y, q.size * 1.45f, p);
+                          int sa = (int) (a * 0.3f * fadeIn);
+                          float sx = q.x + (float) Math.sin(time * 0.9f + q.seed) * 8;
+                          float narrow = Math.max(0.15f, Math.min(1f, (q.y - q.flueTop) / 260f));
+                          float rr = q.size * narrow;
+                          if (rr < 2 || sa < 2) continue;
+                          p.setShader(new RadialGradient(sx, q.y, rr, (sa << 24) | (q.color & 0xffffff), q.color & 0xffffff, Shader.TileMode.CLAMP));
+                          c.drawCircle(sx, q.y, rr, p);
+                          p.setShader(null);
                           continue;
                       }
                       if (q.glyph != null) {
@@ -3994,8 +4131,7 @@ jobs:
                   String msg = null;
                   if (overlay == OV_NONE && launching == null) {
                       if (near != null) msg = null;
-                      else if (nearCh != null && sittingChair == null)
-                          msg = "Press OK to watch " + nearCh.label + (nearCh.sub != null ? " (" + nearCh.sub + ")" : "");
+                      else if (nearCh != null && sittingChair == null) msg = null;
                       else if (sittingChair != null) msg = "Switching to " + sittingChair.label + "…";
                       else {
                           String o = nearObject();
@@ -4176,13 +4312,13 @@ jobs:
                       for (int i = 0; i < 3; i++) {
                           float sx = 560 + i * 70;
                           p.setColor(i == 1 ? 0xff43a047 : 0xffe53935);
-                          c.drawRect(sx, 136, sx + 22, 176, p);
-                          c.drawOval(sx - 4, 164, sx + 30, 184, p);
+                          c.drawRect(sx, 184, sx + 22, 222, p);
+                          c.drawOval(sx - 4, 210, sx + 30, 230, p);
                           p.setColor(0xffffffff);
-                          c.drawRect(sx - 2, 132, sx + 24, 144, p);
+                          c.drawRect(sx - 2, 180, sx + 24, 192, p);
                       }
                   } else if (season == SEASON_HALLOWEEN) {
-                      drawPumpkin(c, 735, 103, 1);
+                      drawPumpkin(c, 735, 151, 1);
                   }
 
                   // Player (and a cozy chirp when sitting), with Ezio in front or behind depending on who's lower
@@ -4699,111 +4835,184 @@ jobs:
                   fireBg = Bitmap.createBitmap(VW, VH, Bitmap.Config.RGB_565);
                   Canvas c = new Canvas(fireBg);
                   Paint w = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  c.drawColor(0xff241e1b);
                   Random r = new Random(19);
+                  // igloo ice wall around the fireplace
+                  w.setShader(new LinearGradient(0, 0, 0, VH, 0xffc9e2f0, 0xff9fc4da, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 0, VW, VH, w);
+                  w.setShader(null);
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setStrokeWidth(2);
+                  w.setColor(0xff8fb6cd);
+                  for (int row = 0; row < 9; row++) {
+                      float y = row * 84;
+                      c.drawLine(0, y, VW, y, w);
+                      for (float x = (row % 2) * 90; x < VW; x += 180) c.drawLine(x, y, x, y + 84, w);
+                  }
+                  w.setStyle(Paint.Style.FILL);
+                  // stone fireplace front (runs up out of view into the chimney)
                   int[] stones = {0xff5d5550, 0xff665d58, 0xff746b66, 0xff57504c, 0xff6b625d};
+                  w.setColor(0xff3a3431);
+                  c.drawRect(170, 0, VW - 170, 660, w);
+                  c.save();
+                  c.clipRect(170, 0, VW - 170, 660);
                   for (int row = 0; row < 13; row++) {
-                      float y = row * 58 - 10;
-                      float x = -(row % 2) * 60 - r.nextInt(40);
-                      while (x < VW) {
-                          float sw = 90 + r.nextInt(60);
+                      float y = row * 54 - 8;
+                      float x = 170 - (row % 2) * 50 - r.nextInt(30);
+                      while (x < VW - 170) {
+                          float sw = 80 + r.nextInt(50);
                           w.setColor(stones[r.nextInt(stones.length)]);
-                          rf.set(x + 3, y + 3, x + sw - 3, y + 55);
-                          c.drawRoundRect(rf, 12, 12, w);
+                          rf.set(x + 3, y + 3, x + sw - 3, y + 51);
+                          c.drawRoundRect(rf, 10, 10, w);
                           x += sw;
                       }
                   }
-                  // mantle
-                  w.setColor(0xff3e2723);
-                  c.drawRect(120, 58, VW - 120, 108, w);
-                  w.setColor(0xff5d4037);
-                  c.drawRect(120, 58, VW - 120, 68, w);
-                  drawNameplate(c, w, VW / 2f, 84, 1.45f);
-                  // opening
-                  w.setColor(0xff0c0908);
-                  rf.set(250, 150, 1030, 470);
-                  c.drawArc(rf, 180, 180, true, w);
-                  c.drawRect(250, 310, 1030, 650, w);
-                  // soot-dark back bricks
-                  w.setStyle(Paint.Style.STROKE);
-                  w.setStrokeWidth(2);
-                  w.setColor(0xff1c1412);
-                  // fill the whole opening, arch included
-                  Path arch = new Path();
-                  arch.moveTo(256, 310);
-                  rf.set(256, 156, 1024, 464);
-                  arch.arcTo(rf, 180, 180, false);
-                  arch.lineTo(1024, 650);
-                  arch.lineTo(256, 650);
-                  arch.close();
-                  fireArch = arch;
+                  c.restore();
+
+                  // the opening, and the firebox inside it with real depth: side walls, back wall, floor
+                  float oL = 320, oR = 960, oTop = 260, oBot = 640;      // opening in the stone
+                  float bL = 450, bR = 830, bTop = 345, bBot = 590;      // back wall, further away
+                  Path open = new Path();
+                  open.moveTo(oL, 400);
+                  rf.set(oL, oTop, oR, oTop + 280);
+                  open.arcTo(rf, 180, 180, false);
+                  open.lineTo(oR, oBot);
+                  open.lineTo(oL, oBot);
+                  open.close();
+                  fireArch = open;
                   c.save();
-                  c.clipPath(arch);
-                  for (int row = 0; row < 14; row++) {
-                      float y = 140 + row * 36;
-                      c.drawLine(250, y, 1030, y, w);
-                      for (float x = 250 + (row % 2) * 40; x < 1030; x += 80) c.drawLine(x, y, x, y + 36, w);
+                  c.clipPath(open);
+                  w.setColor(0xff120d0b);
+                  c.drawRect(oL, oTop, oR, oBot, w);
+                  // side walls (lit a little by the fire)
+                  Path side = new Path();
+                  side.moveTo(oL, oTop + 60); side.lineTo(bL, bTop + 40); side.lineTo(bL, bBot); side.lineTo(oL, oBot); side.close();
+                  w.setShader(new LinearGradient(oL, 0, bL, 0, 0xff2a1c16, 0xff3d2a20, Shader.TileMode.CLAMP));
+                  c.drawPath(side, w);
+                  side.reset();
+                  side.moveTo(oR, oTop + 60); side.lineTo(bR, bTop + 40); side.lineTo(bR, bBot); side.lineTo(oR, oBot); side.close();
+                  w.setShader(new LinearGradient(oR, 0, bR, 0, 0xff2a1c16, 0xff3d2a20, Shader.TileMode.CLAMP));
+                  c.drawPath(side, w);
+                  // floor of the firebox
+                  side.reset();
+                  side.moveTo(bL, bBot); side.lineTo(bR, bBot); side.lineTo(oR, oBot); side.lineTo(oL, oBot); side.close();
+                  w.setShader(new LinearGradient(0, bBot, 0, oBot, 0xff2b1d17, 0xff1a120f, Shader.TileMode.CLAMP));
+                  c.drawPath(side, w);
+                  w.setShader(null);
+                  // back wall with smaller bricks (it's further away)
+                  Path back = new Path();
+                  back.moveTo(bL, bBot);
+                  back.lineTo(bL, bTop + 40);
+                  rf.set(bL, bTop, bR, bTop + 150);
+                  back.arcTo(rf, 180, 180, false);
+                  back.lineTo(bR, bBot);
+                  back.close();
+                  w.setColor(0xff3a2820);
+                  c.drawPath(back, w);
+                  c.save();
+                  c.clipPath(back);
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setStrokeWidth(1.5f);
+                  w.setColor(0xff22160f);
+                  for (int row = 0; row < 12; row++) {
+                      float y = bTop + row * 22;
+                      c.drawLine(bL, y, bR, y, w);
+                      for (float x = bL + (row % 2) * 24; x < bR; x += 48) c.drawLine(x, y, x, y + 22, w);
                   }
                   c.restore();
+                  // brick lines on the side walls, slanting toward the back
+                  w.setColor(0xff1f150f);
+                  for (int k = 1; k < 9; k++) {
+                      float t = k / 9f;
+                      float yo = oTop + 60 + (oBot - oTop - 60) * t, yb = bTop + 40 + (bBot - bTop - 40) * t;
+                      c.drawLine(oL, yo, bL, yb, w);
+                      c.drawLine(oR, yo, bR, yb, w);
+                  }
                   w.setStyle(Paint.Style.FILL);
-                  // hearth
+                  c.restore();
+                  // stone edge around the opening
+                  w.setStyle(Paint.Style.STROKE);
+                  w.setStrokeWidth(6);
+                  w.setColor(0xff4d4542);
+                  c.drawPath(open, w);
+                  w.setStyle(Paint.Style.FILL);
+
+                  // hearth slab in front
                   w.setColor(0xff4a4441);
-                  c.drawRect(170, 640, VW - 170, VH, w);
+                  c.drawRect(250, 640, VW - 250, VH, w);
                   w.setColor(0xff5b5450);
-                  c.drawRect(170, 640, VW - 170, 652, w);
-                  // ember initial positions
-                  emberX = new float[70]; emberY = new float[70]; emberPh = new float[70];
-                  for (int i = 0; i < 70; i++) {
-                      emberX[i] = 380 + r.nextFloat() * 520;
-                      emberY[i] = 600 + r.nextFloat() * 36;
+                  c.drawRect(250, 640, VW - 250, 652, w);
+
+                  // thick wooden mantle that overhangs the stone on both sides
+                  w.setColor(0x55000000);
+                  c.drawRect(150, 196, VW - 150, 212, w);              // shadow on the stone
+                  w.setColor(0xff4e342e);
+                  c.drawRect(130, 118, VW - 130, 196, w);              // front face
+                  w.setColor(0xff6d4c41);
+                  c.drawRect(130, 108, VW - 130, 124, w);              // top edge catching the light
+                  w.setColor(0xff3e2723);
+                  c.drawRect(130, 186, VW - 130, 196, w);              // underside
+                  drawNameplate(c, w, VW / 2f, 154, 1.45f);
+
+                  // ember bed positions, on the firebox floor
+                  emberX = new float[60]; emberY = new float[60]; emberPh = new float[60];
+                  for (int i = 0; i < 60; i++) {
+                      emberX[i] = 500 + r.nextFloat() * 280;
+                      emberY[i] = 584 + r.nextFloat() * 20;
                       emberPh[i] = r.nextFloat() * 6.28f;
                   }
+                  // a soft glow, made once and faded up and down while drawing
+                  glowBmp = Bitmap.createBitmap(VW / 2, VH / 2, Bitmap.Config.ARGB_8888);
+                  Canvas gc = new Canvas(glowBmp);
+                  Paint gp = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  gp.setShader(new RadialGradient(VW / 4f, 270, 300, 0x99ff7a1a, 0x00ff7a1a, Shader.TileMode.CLAMP));
+                  gc.drawRect(0, 0, VW / 2f, VH / 2f, gp);
               }
 
               void drawFire(Canvas c) {
                   if (fireBg == null) bakeFireBg();
                   c.drawBitmap(fireBg, 0, 0, null);
                   float flick = (float) (Math.sin(time * 9.7) * 0.5 + Math.sin(time * 15.3) * 0.3 + Math.sin(time * 23.1) * 0.2);
-
-                  // big warm glow
-                  p.setShader(new RadialGradient(640, 520, 520 + flick * 25, 0x88ff7a1a, 0x00ff7a1a, Shader.TileMode.CLAMP));
-                  c.drawRect(0, 0, VW, VH, p);
-                  p.setShader(null);
+                  // glow behind the fire: slow, layered flicker that never drops out
+                  float glow = 0.78f + 0.12f * (float) Math.sin(time * 2.1) + 0.06f * (float) Math.sin(time * 5.3 + 1) + 0.04f * (float) Math.sin(time * 11.7 + 2);
+                  Paint gpaint = new Paint();
+                  gpaint.setAlpha((int) (255 * Math.max(0.6f, Math.min(1f, glow))));
+                  src.set(0, 0, VW / 2, VH / 2);
+                  dst.set(0, 0, VW, VH);
+                  c.drawBitmap(glowBmp, src, dst, gpaint);
 
                   // smoke sits behind the flames, and stays inside the fireplace opening
                   c.save();
                   if (fireArch != null) c.clipPath(fireArch);
                   drawParts(c, false, 1);
-                  c.restore();
 
                   // glowing ember bed
                   for (int i = 0; i < emberX.length; i++) {
                       float g = 0.55f + 0.45f * (float) Math.sin(time * (2 + i % 5) + emberPh[i]);
                       int rr = 255, gg = (int) (60 + 120 * g), bb = (int) (20 * g);
                       p.setColor(0xff000000 | (rr << 16) | (gg << 8) | bb);
-                      c.drawCircle(emberX[i], emberY[i], 5 + 4 * g, p);
+                      c.drawCircle(emberX[i], emberY[i], 3.5f + 3 * g, p);
                   }
 
-                  // back logs (the flames grow out from between these)
-                  drawLog(c, 560, 580, 360, 46, 14, flick);
-                  drawLog(c, 730, 583, 360, 46, -16, flick);
+                  // back logs (the flames grow out from between these), set back in the firebox
+                  drawLog(c, 585, 575, 270, 36, 12, flick);
+                  drawLog(c, 700, 577, 270, 36, -14, flick);
 
                   // flames: several tongues, four colour layers from deep orange to white-hot
                   int[] cols = {0xd9ff3d00, 0xe6ff8f00, 0xf0ffca28, 0xfffff3c4};
                   float[] scales = {1f, 0.78f, 0.55f, 0.3f};
-                  float by = 622;
+                  float by = 596;
                   for (int layer = 0; layer < 4; layer++) {
                       p.setColor(cols[layer]);
                       float ls = scales[layer];
                       for (int i = 0; i < 11; i++) {
-                          float base = 330 * (1 - Math.abs(i - 5) / 7f);
+                          float base = 250 * (1 - Math.abs(i - 5) / 7f);
                           float n = 0.62f + 0.22f * (float) Math.sin(time * 3.1f + i * 1.7f)
                                   + 0.12f * (float) Math.sin(time * 7.3f + i * 3.1f)
                                   + 0.07f * (float) Math.sin(time * 13.7f + i * 0.9f);
                           float hgt = base * n * (0.55f + 0.45f * ls) * (layer == 3 ? 0.6f : 1f);
-                          float w = 52 * ls + 6;
-                          float fx = 420 + i * 44;
-                          float sx = (float) Math.sin(time * 2.3f + i) * 26 + (float) Math.sin(time * 5.1f + i * 2) * 9;
+                          float w = 40 * ls + 5;
+                          float fx = 640 + (i - 5) * 33;
+                          float sx = (float) Math.sin(time * 2.3f + i) * 20 + (float) Math.sin(time * 5.1f + i * 2) * 7;
                           path.reset();
                           path.moveTo(fx - w, by);
                           path.cubicTo(fx - w, by - hgt * 0.45f, fx + sx * 0.5f - w * 0.4f, by - hgt * 0.78f, fx + sx, by - hgt);
@@ -4814,34 +5023,29 @@ jobs:
                   }
 
                   // front log sits in front of the flames, hiding where they start
-                  drawLog(c, 640, 614, 600, 54, -4, flick);
+                  drawLog(c, 640, 598, 440, 42, -3, flick);
+
+                  drawParts(c, false, 2);
+                  c.restore();
 
                   // seasonal mantle decor
                   int season = activeSeason();
                   if (season == SEASON_XMAS) {
                       for (int i = 0; i < 5; i++) {
-                          float sx = 300 + i * 170;
+                          float sx = 250 + i * 190;
                           p.setColor(i % 2 == 0 ? 0xffc62828 : 0xff2e7d32);
-                          c.drawRect(sx, 108, sx + 36, 176, p);
-                          c.drawOval(sx - 6, 158, sx + 50, 190, p);
+                          c.drawRect(sx, 196, sx + 36, 262, p);
+                          c.drawOval(sx - 6, 246, sx + 50, 278, p);
                           p.setColor(0xffffffff);
-                          c.drawRect(sx - 3, 104, sx + 39, 122, p);
+                          c.drawRect(sx - 3, 192, sx + 39, 210, p);
                       }
                   } else if (season == SEASON_HALLOWEEN) {
-                      drawPumpkin(c, 220, 58, 1);
-                      drawPumpkin(c, VW - 220, 58, 1);
+                      drawPumpkin(c, 230, 108, 1);
+                      drawPumpkin(c, VW - 230, 108, 1);
                   }
 
-                  c.save();
-                  if (fireArch != null) c.clipPath(fireArch);
-                  drawParts(c, false, 2);
-                  c.restore();
-
-                  // Ezio, if he's inside, lounging on the hearth
-                  if (ezScene == SCENE_IGLOO) drawEzio(c, 960, 714, 2.4f, LEFT, false, !ezFollow, ezPhase, ezBlinkT > 0, season);
-
                   // overall flicker on the room
-                  int dim = (int) (40 + flick * 18);
+                  int dim = (int) (40 + flick * 14);
                   c.drawColor(Math.max(0, dim) << 24);
 
                   if (fireHintT < 5) {
@@ -5033,9 +5237,9 @@ jobs:
                   c.drawRect(l + w / 2 - 14, t + 20, l + w / 2 + 14, t + h - 20, p);
 
                   int n = discs.size();
-                  int sel = Math.max(0, Math.min(n - 1, folderSel));
+                  int sel = Math.max(0, Math.min(folderSlots() - 1, folderSel));
                   int page = sel / 8;
-                  int pages = Math.max(1, (n + 7) / 8);
+                  int pages = folderSlots() / 8;
                   float pw = w / 2 - 50, ph = h - 112;
                   float sw = pw / 2 - 18, sh = ph / 2 - 18;
                   float selX = 0, selY = 0;
@@ -5050,6 +5254,15 @@ jobs:
                           float dcx = sl + sw / 2, dcy = st + sh / 2 + 6;
                           if (idx < n && idx == sel) { selX = dcx; selY = dcy; }
                           else if (idx < n) drawDisc(c, dcx, dcy, 90, discs.get(idx), false);
+                          if (idx >= n && idx == sel) {
+                              // an empty sleeve you've landed on
+                              p.setStyle(Paint.Style.STROKE);
+                              p.setStrokeWidth(4);
+                              p.setColor(0xccffffff);
+                              rf.set(sl - 3, st - 3, sl + sw + 3, st + sh + 3);
+                              c.drawRoundRect(rf, 12, 12, p);
+                              p.setStyle(Paint.Style.FILL);
+                          }
                           // clear plastic sleeve over the disc
                           rf.set(sl, st, sl + sw, st + sh);
                           p.setColor(0x1effffff);
@@ -5072,7 +5285,12 @@ jobs:
                       }
                   }
                   // The chosen disc slides up out of its sleeve
-                  if (n > 0) {
+                  if (sel >= n) {
+                      tp.setTextAlign(Paint.Align.CENTER);
+                      tp.setTextSize(23);
+                      tp.setColor(0xffb0bec5);
+                      c.drawText("Empty sleeve", VW / 2f, t + h - 50, tp);
+                  } else if (n > 0) {
                       Disc d = discs.get(sel);
                       float lift = 24 + (float) Math.sin(time * 3) * 3;
                       p.setColor(0x50000000);
@@ -5222,6 +5440,33 @@ jobs:
                   c.drawText("Back to close", l + w - 24, t + 30, tp);
               }
 
+              /** A little silver 2000s stereo remote, for the wheel. */
+              void drawRemoteIcon(Canvas c, float x, float y, float s) {
+                  c.save();
+                  c.translate(x, y);
+                  c.rotate(-18);
+                  c.scale(s, s);
+                  p.setColor(0x55000000);
+                  rf.set(-11, -23, 13, 27);
+                  c.drawRoundRect(rf, 11, 11, p);
+                  p.setColor(0xffc9ced4);
+                  rf.set(-12, -25, 12, 25);
+                  c.drawRoundRect(rf, 11, 11, p);
+                  p.setColor(0xffe6e9ec);
+                  rf.set(-10, -23, 10, -4);
+                  c.drawRoundRect(rf, 9, 9, p);
+                  p.setColor(0xffe53935);
+                  c.drawCircle(5, -18, 2.6f, p);          // power
+                  p.setColor(0xff455a64);
+                  for (int r2 = 0; r2 < 3; r2++) for (int k = -1; k <= 1; k++) c.drawCircle(k * 6, -6 + r2 * 7, 2.1f, p);
+                  p.setColor(0xff1e88e5);
+                  c.drawCircle(0, 16, 3.2f, p);           // play
+                  p.setColor(0xff78909c);
+                  c.drawCircle(-6, 16, 2f, p);
+                  c.drawCircle(6, 16, 2f, p);
+                  c.restore();
+              }
+
               void drawWheel(Canvas c) {
                   // Stick picks a slice directly
                   if (Math.abs(axX) + Math.abs(axY) > 0.6f) {
@@ -5256,7 +5501,8 @@ jobs:
                       float ix = cx + (float) Math.cos(a) * 168, iy = cy + (float) Math.sin(a) * 168;
                       tp.setColor(0xffffffff);
                       tp.setTextSize(i == wheelSel ? 46 : 38);
-                      c.drawText(WHEEL_ICONS[i], ix, iy + 8, tp);
+                      if (i == W_REMOTE) drawRemoteIcon(c, ix, iy - 6, i == wheelSel ? 1.15f : 1f);
+                      else c.drawText(WHEEL_ICONS[i], ix, iy + 8, tp);
                       tp.setTextSize(14);
                       tp.setColor(i == wheelSel ? 0xffffffff : 0xffb0bec5);
                       String nm = i == W_MUSIC ? (musicOn ? "Music: on" : "Music: off")
