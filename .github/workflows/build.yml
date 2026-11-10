@@ -206,6 +206,7 @@ jobs:
           import android.media.MediaMetadata;
           import android.media.MediaPlayer;
           import android.media.session.MediaController;
+          import android.media.session.MediaSession;
           import android.media.session.MediaSessionManager;
           import android.media.session.PlaybackState;
           import android.media.SoundPool;
@@ -349,7 +350,7 @@ jobs:
                   int color;
                   String glyph;
                   boolean world, flue;
-                  float flueX, flueTop, grow;
+                  float flueX, flueTop, grow, drag, wander, seed;
               }
 
               /** One CD in the folder: either a YouTube playlist or a mix of songs copied onto the TV. */
@@ -387,7 +388,7 @@ jobs:
               SharedPreferences prefs;
               boolean musicOn, soundOn, weatherFx;
               int seasonPref;
-              boolean namesAlways, autoReturn;
+              boolean namesAlways, autoReturn, tagColour;
               int clockSize;
               final Set<String> hidden = new HashSet<>();
 
@@ -411,7 +412,7 @@ jobs:
               boolean cdResumeOnReturn;
               float nextCdNote;
               volatile boolean returnPending, mediaAccess, ytUserPaused, ytSawPlaying;
-              volatile long ytJudgeAfter;
+              volatile long ytJudgeAfter, returnArmedAt, ytResumeAt;
               volatile String ytSeenTitle;
               final ArrayList<Integer> ytOrder = new ArrayList<>();
               int ytPos;
@@ -468,6 +469,7 @@ jobs:
               boolean bellyIcons;
               float[] emberX, emberY, emberPh;
               Bitmap fireBg;
+              Path fireArch;
               final Map<String, AppPeng> byPkg = new HashMap<>();
               float[] waveX, waveY, wavePh;
               float[] flX, flY, flSpd, flR;
@@ -518,6 +520,7 @@ jobs:
                   bellyIcons = prefs.getBoolean("belly", false);
                   namesAlways = prefs.getBoolean("namesalways", true);
                   autoReturn = prefs.getBoolean("autoreturn", true);
+                  tagColour = prefs.getBoolean("tagcolour", false);
                   clockSize = prefs.getInt("clocksize", 2);
                   cdVolume = prefs.getFloat("cdvol", 1f);
                   hidden.addAll(prefs.getStringSet("hidden", new HashSet<String>()));
@@ -941,6 +944,11 @@ jobs:
               void radioToggle() {
                   Disc d = nowDisc;
                   if (d == null) return;
+                  if (nowYT && mediaAccess && smartTubeSession() == null) {
+                      // SmartTube's player was closed: start the disc again
+                      playYouTube(d, null, null);
+                      return;
+                  }
                   if (nowYT) {
                       MediaController mc = smartTubeSession();
                       boolean wasPaused = radioPaused;
@@ -1039,6 +1047,26 @@ jobs:
                       toast("Install SmartTube to play YouTube discs");
                       return;
                   }
+                  // Already playing this disc? Try to jump straight to the chosen song inside SmartTube
+                  if (videoId != null && title != null && nowYT && nowDisc == d) {
+                      MediaController mc = smartTubeSession();
+                      try {
+                          List<MediaSession.QueueItem> q = mc != null ? mc.getQueue() : null;
+                          if (q != null) {
+                              for (MediaSession.QueueItem it : q) {
+                                  CharSequence qt = it.getDescription() != null ? it.getDescription().getTitle() : null;
+                                  if (qt != null && qt.toString().equalsIgnoreCase(title)) {
+                                      mc.getTransportControls().skipToQueueItem(it.getQueueId());
+                                      nowTitle = title;
+                                      radioPaused = false;
+                                      ytUserPaused = false;
+                                      updateMusic();
+                                      return;
+                                  }
+                              }
+                          }
+                      } catch (Exception ignored) { }
+                  }
                   stopRadio();
                   nowDisc = d;
                   nowYT = true;
@@ -1061,6 +1089,7 @@ jobs:
 
               void armReturn() {
                   if (!autoReturn) return;
+                  returnArmedAt = System.currentTimeMillis();
                   returnHits = 0;
                   returnDeadline = System.currentTimeMillis() + 300000;
                   returnPending = true;
@@ -1144,8 +1173,8 @@ jobs:
                       parseTracks(html, d.list, out);
                   } catch (Exception ignored) { }
                   if (!out.isEmpty()) {
-                      d.tracks = out;
                       fillTitles(d, out);
+                      d.tracks = out;
                       try {
                           JSONArray a = new JSONArray();
                           for (String[] t : out) { JSONArray p = new JSONArray(); p.put(t[0]); p.put(t[1]); a.put(p); }
@@ -1158,47 +1187,48 @@ jobs:
                       JSONArray a = new JSONArray(prefs.getString("tracks_" + d.list, "[]"));
                       for (int i = 0; i < a.length(); i++) out.add(new String[]{a.getJSONArray(i).getString(0), a.getJSONArray(i).getString(1)});
                   } catch (Exception ignored) { }
+                  for (String[] t : out) { String c2 = prefs.getString("ytt_" + t[0], null); if (c2 != null) t[1] = c2; }
                   if (!out.isEmpty()) d.tracks = out;
                   return out;
               }
 
               /** Looks up each song's real name (YouTube's simple "oEmbed" lookup), remembering them. Runs in the background. */
               void fillTitles(Disc d, ArrayList<String[]> tracks) {
-                  new Thread(() -> {
-                      boolean changed = false;
-                      for (String[] t : tracks) {
-                          String cached = prefs.getString("ytt_" + t[0], null);
-                          if (cached != null) { if (!cached.equals(t[1])) { t[1] = cached; changed = true; } continue; }
-                          try {
-                              HttpURLConnection con = (HttpURLConnection) new URL("https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D" + t[0]).openConnection();
-                              con.setConnectTimeout(6000);
-                              con.setReadTimeout(6000);
-                              String body;
-                              try (InputStream in = con.getInputStream()) {
-                                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                                  byte[] buf = new byte[4096];
-                                  int n;
-                                  while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
-                                  body = bo.toString("UTF-8");
-                              } finally {
-                                  con.disconnect();
-                              }
-                              String title = new JSONObject(body).optString("title", "");
-                              if (!title.isEmpty()) {
-                                  t[1] = title;
-                                  prefs.edit().putString("ytt_" + t[0], title).apply();
-                                  changed = true;
-                              }
-                          } catch (Exception ignored) { }
-                      }
-                      if (changed) {
-                          try {
-                              JSONArray a = new JSONArray();
-                              for (String[] t : tracks) { JSONArray p2 = new JSONArray(); p2.put(t[0]); p2.put(t[1]); a.put(p2); }
-                              prefs.edit().putString("tracks_" + d.list, a.toString()).apply();
-                          } catch (Exception ignored) { }
-                      }
-                  }, "island-titles").start();
+                  // a few lookups at a time so the song list loads quickly
+                  java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
+                  Thread[] workers = new Thread[4];
+                  for (int w = 0; w < workers.length; w++) {
+                      workers[w] = new Thread(() -> {
+                          int k;
+                          while ((k = next.getAndIncrement()) < tracks.size()) {
+                              String[] t = tracks.get(k);
+                              String cached = prefs.getString("ytt_" + t[0], null);
+                              if (cached != null) { t[1] = cached; continue; }
+                              try {
+                                  HttpURLConnection con = (HttpURLConnection) new URL("https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D" + t[0]).openConnection();
+                                  con.setConnectTimeout(6000);
+                                  con.setReadTimeout(6000);
+                                  String body;
+                                  try (InputStream in = con.getInputStream()) {
+                                      ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                                      byte[] buf = new byte[4096];
+                                      int n;
+                                      while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                                      body = bo.toString("UTF-8");
+                                  } finally {
+                                      con.disconnect();
+                                  }
+                                  String title = new JSONObject(body).optString("title", "");
+                                  if (!title.isEmpty()) {
+                                      t[1] = title;
+                                      prefs.edit().putString("ytt_" + t[0], title).apply();
+                                  }
+                              } catch (Exception ignored) { }
+                          }
+                      }, "island-titles");
+                      workers[w].start();
+                  }
+                  for (Thread th : workers) { try { th.join(30000); } catch (InterruptedException ignored) { } }
               }
 
               static void parseTracks(String html, String list, ArrayList<String[]> out) {
@@ -1211,8 +1241,7 @@ jobs:
                       if (!seen.add(id)) continue;
                       int idx = 0;
                       try { idx = Integer.parseInt(m.group(2)); } catch (Exception ignored) { }
-                      String t = titleBefore(html, m.start(), 6000);
-                      found.add(new Object[]{idx, id, t});
+                      found.add(new Object[]{idx, id, null});
                   }
                   Collections.sort(found, (a, b) -> Integer.compare((Integer) a[0], (Integer) b[0]));
                   for (Object[] f : found) out.add(new String[]{(String) f[1], f[2] != null ? (String) f[2] : "Song " + (out.size() + 1)});
@@ -1288,6 +1317,13 @@ jobs:
                                   long dur = md != null ? md.getLong(MediaMetadata.METADATA_KEY_DURATION) : 0;
                                   long pos = st != null ? st.getPosition() : 0;
                                   if (title != null && !title.isEmpty()) nowTitle = title;
+                                  if (ytResumeAt > 0 && now >= ytResumeAt) {
+                                      ytResumeAt = 0;
+                                      if (!stPlaying && !ytUserPaused && state == PlaybackState.STATE_PAUSED) {
+                                          mc.getTransportControls().play();
+                                          stPlaying = true;
+                                      }
+                                  }
                                   if (stPlaying) { ytSawPlaying = true; ytQuietSince = 0; }
                                   boolean wasPaused = radioPaused;
                                   radioPaused = !stPlaying;
@@ -1300,11 +1336,14 @@ jobs:
                           }
                           // Once SmartTube is playing, hop back to the island (needs "display over other apps")
                           if (returnPending) {
-                              if (resumed || now > returnDeadline) returnPending = false;
+                              if ((resumed && now - returnArmedAt > 6000) || now > returnDeadline) returnPending = false;
+                              else if (resumed) { }
                               else {
                                   returnHits = musicOn ? returnHits + 1 : 0;
                                   if (returnHits >= 2) {
                                       returnPending = false;
+                                      // SmartTube pauses when the island covers it, so press play again for you
+                                      ytResumeAt = now + 2500;
                                       runOnUiThread(() -> {
                                           try {
                                               Intent i = new Intent(this, MainActivity.class);
@@ -2531,40 +2570,66 @@ jobs:
 
               void updateFire(float dt) {
                   fireHintT += dt;
-                  // sparks
-                  // A few stray sparks, then every so often a little burst of them
+                  // A few stray sparks drifting up
                   if (rnd.nextFloat() < dt * 2.5f) spark(640 + (rnd.nextFloat() - 0.5f) * 380, 560, false);
-                  if (rnd.nextFloat() < dt * 0.55f) {
+                  // Every so often a log pops: a quick snappy burst of sparks
+                  if (rnd.nextFloat() < dt * 0.5f) {
                       float x = 640 + (rnd.nextFloat() - 0.5f) * 300;
-                      int count = 5 + rnd.nextInt(12);
-                      for (int i = 0; i < count; i++) spark(x, 570, true);
+                      int count = 6 + rnd.nextInt(12);
+                      for (int i = 0; i < count; i++) spark(x, 575, true);
                   }
-                  // Soft dark smoke drifting up the chimney
-                  if (rnd.nextFloat() < dt * 3f) {
-                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 240, 400 + rnd.nextFloat() * 60, false);
-                      q.vx = (rnd.nextFloat() - 0.5f) * 20; q.vy = -45 - rnd.nextFloat() * 25;
-                      q.max = q.life = 4.5f; q.size = 14 + rnd.nextFloat() * 10; q.grow = 9f;
-                      q.color = 0xff1a1412;
-                      q.flue = true; q.flueX = 640; q.flueTop = 150;
+                  // A little faint smoke, curling like a ribbon up the flue
+                  if (rnd.nextFloat() < dt * 1.1f) {
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 160, 360 + rnd.nextFloat() * 40, false);
+                      q.vx = (rnd.nextFloat() - 0.5f) * 14; q.vy = -38 - rnd.nextFloat() * 18;
+                      q.max = q.life = 4f; q.size = 10 + rnd.nextFloat() * 6; q.grow = 3.5f;
+                      q.color = 0xff2b2522;
+                      q.seed = rnd.nextFloat() * 6.28f;
+                      q.flue = true; q.flueX = 640; q.flueTop = 205;
                   }
-                  // little flame wisps that break off
-                  if (rnd.nextFloat() < dt * 3) {
-                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 260, 330 + rnd.nextFloat() * 80, false);
-                      q.vx = (rnd.nextFloat() - 0.5f) * 30; q.vy = -90 - rnd.nextFloat() * 50;
-                      q.max = q.life = 0.5f; q.size = 7 + rnd.nextFloat() * 6; q.color = 0xffffa726;
-                      q.flue = true; q.flueX = 640; q.flueTop = 165;
+                  // Bigger embers breaking off the flames: some rise away, some just fade, some wander about
+                  if (rnd.nextFloat() < dt * 2.2f) {
+                      Part q = part(640 + (rnd.nextFloat() - 0.5f) * 260, 340 + rnd.nextFloat() * 90, false);
+                      q.size = 4 + rnd.nextFloat() * 5;
+                      q.color = rnd.nextBoolean() ? 0xffffa726 : 0xffffcc80;
+                      q.seed = rnd.nextFloat() * 6.28f;
+                      float kind = rnd.nextFloat();
+                      if (kind < 0.35f) {            // rises up the chimney
+                          q.vx = (rnd.nextFloat() - 0.5f) * 30; q.vy = -80 - rnd.nextFloat() * 50;
+                          q.max = q.life = 2f + rnd.nextFloat() * 1.2f; q.grow = -1.2f;
+                          q.flue = true; q.flueX = 640; q.flueTop = 175;
+                      } else if (kind < 0.65f) {     // fades out where it is
+                          q.vx = (rnd.nextFloat() - 0.5f) * 16; q.vy = -18 - rnd.nextFloat() * 14;
+                          q.max = q.life = 0.5f + rnd.nextFloat() * 0.5f; q.grow = -3f;
+                      } else {                       // wanders around, then dies out
+                          q.vx = 0; q.vy = -25 - rnd.nextFloat() * 20;
+                          q.wander = 40 + rnd.nextFloat() * 50;
+                          q.max = q.life = 1.6f + rnd.nextFloat() * 1.4f; q.grow = -1.5f;
+                      }
                   }
               }
 
               void spark(float x, float y, boolean pop) {
                   Part q = part(x, y, false);
-                  q.vx = (rnd.nextFloat() - 0.5f) * (pop ? 260 : 60);
-                  q.vy = pop ? -150 - rnd.nextFloat() * 250 : -120 - rnd.nextFloat() * 160;
-                  q.g = pop ? 160 : 20;
-                  q.max = q.life = 1.2f + rnd.nextFloat() * 1.5f;
-                  q.size = pop ? 2.2f : 1.4f + rnd.nextFloat() * 1.4f;
+                  if (pop) {
+                      // fast and sharp, then quickly slowed by the air: a snap, not a fountain
+                      double a = -Math.PI / 2 + (rnd.nextDouble() - 0.5) * 2.2;
+                      float sp = 320 + rnd.nextFloat() * 380;
+                      q.vx = (float) Math.cos(a) * sp;
+                      q.vy = (float) Math.sin(a) * sp;
+                      q.g = 140;
+                      q.drag = 4.5f;
+                      q.max = q.life = rnd.nextFloat() < 0.75f ? 0.35f + rnd.nextFloat() * 0.4f : 1.1f + rnd.nextFloat() * 0.8f;
+                      q.size = 1.6f + rnd.nextFloat() * 1.2f;
+                  } else {
+                      q.vx = (rnd.nextFloat() - 0.5f) * 60;
+                      q.vy = -120 - rnd.nextFloat() * 160;
+                      q.g = 20;
+                      q.max = q.life = 1.2f + rnd.nextFloat() * 1.5f;
+                      q.size = 1.4f + rnd.nextFloat() * 1.4f;
+                      q.flue = true; q.flueX = 640; q.flueTop = 175;
+                  }
                   q.color = rnd.nextBoolean() ? 0xffffe082 : 0xffffab40;
-                  q.flue = true; q.flueX = 640; q.flueTop = 165;
               }
 
               Object nearestTarget(List<AppPeng> list) {
@@ -2948,6 +3013,12 @@ jobs:
                       play(S_TOGGLE, 0.5f, 1f);
                       refreshSettings();
                   }));
+                  listItems.add(new Item("Name tag colour", tagColour ? "Penguin colour" : "Dark", null, () -> {
+                      tagColour = !tagColour;
+                      prefs.edit().putBoolean("tagcolour", tagColour).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
                   listItems.add(new Item("Clock size", CLOCK_SIZE_NAMES[clockSize], null, () -> {
                       clockSize = (clockSize + 1) % CLOCK_SIZES.length;
                       prefs.edit().putInt("clocksize", clockSize).apply();
@@ -3294,8 +3365,9 @@ jobs:
                           if (q.y < q.flueTop) { it.remove(); continue; }
                           if (q.y < q.flueTop + 60) q.life -= dt * 2.5f;
                       }
-                      q.size += q.grow * dt;
-                      q.x += q.vx * dt;
+                      if (q.drag > 0) { float k = Math.max(0, 1 - q.drag * dt); q.vx *= k; q.vy *= k; }
+                      q.size = Math.max(0.3f, q.size + q.grow * dt);
+                      q.x += (q.vx + (q.wander > 0 ? (float) Math.sin(time * 2.3f + q.seed) * q.wander : 0)) * dt;
                       q.y += q.vy * dt;
                   }
               }
@@ -3313,6 +3385,15 @@ jobs:
                       int a = (int) (255 * Math.min(1, q.life / q.max * 1.5f));
                       if (q.grow > 0) a = (int) (a * 0.5f);     // smoke is see-through
                       int col = (a << 24) | (q.color & 0xffffff);
+                      if (!q.world && q.grow > 0) {
+                          // fireplace smoke: a faint swaying ribbon, not a ball
+                          c.save();
+                          c.rotate((float) Math.sin(time * 1.5f + q.seed) * 18, q.x, q.y);
+                          p.setColor(((int) (a * 0.35f) << 24) | (q.color & 0xffffff));
+                          c.drawOval(q.x - q.size * 0.45f, q.y - q.size * 1.8f, q.x + q.size * 0.45f, q.y + q.size * 1.8f, p);
+                          c.restore();
+                          continue;
+                      }
                       if (q.glyph != null) {
                           tp.setColor(col);
                           tp.setTextSize(q.size);
@@ -3466,7 +3547,7 @@ jobs:
 
                   String msg = null;
                   if (overlay == OV_NONE && launching == null) {
-                      if (near != null) msg = "Press OK to open " + near.label;
+                      if (near != null) msg = null;
                       else if (nearCh != null && sittingChair == null)
                           msg = "Press OK to watch " + nearCh.label + (nearCh.sub != null ? " (" + nearCh.sub + ")" : "");
                       else if (sittingChair != null) msg = "Switching to " + sittingChair.label + "…";
@@ -3899,8 +3980,9 @@ jobs:
                   if (bellyIcons) {
                       // Name floats over the head like a username in a game (above the Santa hat at Christmas)
                       float bottom = a.y - (activeSeason() == SEASON_XMAS ? 92 : 74);
-                      if (highlight) drawNameTag(c, a.x, bottom - 4 + bob, a.label);
-                      else if (namesAlways) drawUsername(c, a.x, bottom, a.label);
+                      int body = a.bodyCol & 0xffffff;
+                      if (highlight) drawNameTag(c, a.x, bottom - 4 + bob, a.label, tagColour ? 0xf0000000 | body : 0xe0263238);
+                      else if (namesAlways) drawUsername(c, a.x, bottom, a.label, tagColour ? 0xd8000000 | body : 0x99263238);
                       return;
                   }
                   float s = highlight ? 1.35f : 1f;
@@ -3940,24 +4022,32 @@ jobs:
               }
 
               void drawNameTag(Canvas c, float cx, float bottom, String label) {
+                  drawNameTag(c, cx, bottom, label, 0xe0263238);
+              }
+
+              void drawNameTag(Canvas c, float cx, float bottom, String label, int bg) {
                   String name = label.length() > 22 ? label.substring(0, 21) + "…" : label;
                   tp.setTextSize(21);
                   tp.setTextAlign(Paint.Align.CENTER);
                   float tw = tp.measureText(name);
                   rf.set(cx - tw / 2 - 12, bottom - 32, cx + tw / 2 + 12, bottom);
-                  p.setColor(0xe0263238);
+                  p.setColor(bg);
                   c.drawRoundRect(rf, 14, 14, p);
                   tp.setColor(0xffffffff);
                   c.drawText(name, cx, bottom - 9, tp);
               }
 
               void drawUsername(Canvas c, float cx, float bottom, String label) {
+                  drawUsername(c, cx, bottom, label, 0x99263238);
+              }
+
+              void drawUsername(Canvas c, float cx, float bottom, String label, int bg) {
                   String name = label.length() > 16 ? label.substring(0, 15) + "…" : label;
                   tp.setTextSize(14);
                   tp.setTextAlign(Paint.Align.CENTER);
                   float tw = tp.measureText(name);
                   rf.set(cx - tw / 2 - 7, bottom - 20, cx + tw / 2 + 7, bottom);
-                  p.setColor(0x99263238);
+                  p.setColor(bg);
                   c.drawRoundRect(rf, 10, 10, p);
                   tp.setColor(0xffffffff);
                   c.drawText(name, cx, bottom - 5.5f, tp);
@@ -4087,15 +4177,16 @@ jobs:
                   int light = blend(col, 0xffffffff, 0.25f), dark = blend(col, 0xff000000, 0.3f);
                   p.setColor(0x30000000);
                   c.drawOval(x - 30, y - 6, x + 30, y + 9, p);
-                  // back slats fanning out
+                  // tall back made of upright slats side by side, with a rounded top (tallest in the middle)
                   for (int i = -2; i <= 2; i++) {
-                      c.save();
-                      c.rotate(i * 8, x, y - 16);
+                      float sxc = x + i * 9.5f;
+                      float topY = y - 64 + i * i * 2.6f;
                       p.setColor(i % 2 == 0 ? light : col);
-                      rf.set(x - 6, y - 62, x + 6, y - 14);
-                      c.drawRoundRect(rf, 6, 6, p);
-                      c.restore();
+                      rf.set(sxc - 4.3f, topY, sxc + 4.3f, y - 14);
+                      c.drawRoundRect(rf, 4, 4, p);
                   }
+                  p.setColor(dark);
+                  c.drawRect(x - 23, y - 52, x + 23, y - 48, p);
                   p.setColor(dark);
                   c.drawRect(x - 24, y - 30, x + 24, y - 26, p);
                   // seat
@@ -4194,6 +4285,7 @@ jobs:
                   arch.lineTo(1024, 650);
                   arch.lineTo(256, 650);
                   arch.close();
+                  fireArch = arch;
                   c.save();
                   c.clipPath(arch);
                   for (int row = 0; row < 14; row++) {
@@ -4227,8 +4319,11 @@ jobs:
                   c.drawRect(0, 0, VW, VH, p);
                   p.setShader(null);
 
-                  // smoke sits behind the flames
+                  // smoke sits behind the flames, and stays inside the fireplace opening
+                  c.save();
+                  if (fireArch != null) c.clipPath(fireArch);
                   drawParts(c, false, 1);
+                  c.restore();
 
                   // glowing ember bed
                   for (int i = 0; i < emberX.length; i++) {
@@ -4286,7 +4381,10 @@ jobs:
                       drawPumpkin(c, VW - 220, 58, 1);
                   }
 
+                  c.save();
+                  if (fireArch != null) c.clipPath(fireArch);
                   drawParts(c, false, 2);
+                  c.restore();
 
                   // overall flicker on the room
                   int dim = (int) (40 + flick * 18);
@@ -4343,7 +4441,6 @@ jobs:
                   String np = null;
                   if (nowDisc != null) {
                       String nt = nowTitle == null || nowTitle.isEmpty() ? nowDisc.name : nowTitle;
-                      if (nt.length() > 32) nt = nt.substring(0, 31) + "…";
                       np = "♪  " + (radioBusy() ? "" : "Paused · ") + nt;
                   }
 
@@ -4357,7 +4454,7 @@ jobs:
                       tp.setTextSize(16);
                       wMax = Math.max(wMax, tp.measureText(wl2));
                   }
-                  if (np != null) { tp.setTextSize(17); wMax = Math.max(wMax, tp.measureText(np)); }
+                  if (np != null) wMax = Math.max(wMax, 190);   // long song names scroll instead of stretching the box
                   float right = VW - 30, top = 22;
                   // Clock box size is set in Island settings; it also creeps a few pixels over time to avoid burn-in
                   c.save();
@@ -4389,7 +4486,22 @@ jobs:
                   if (np != null) {
                       tp.setTextSize(17);
                       tp.setColor(0xffe1bee7);
-                      c.drawText(np, tx, npY + 12, tp);
+                      float npW = tp.measureText(np), boxL = right - wMax - 18;
+                      if (npW <= wMax) {
+                          c.drawText(np, tx, npY + 12, tp);
+                      } else {
+                          // Scroll the song name across, pausing at the start
+                          c.save();
+                          c.clipRect(boxL, npY - 10, tx, npY + 20);
+                          float travel = npW - wMax + 30;
+                          float cyc = travel / 40f + 4f;
+                          float ph = (time % cyc);
+                          float off = ph < 2f ? 0 : Math.min(travel, (ph - 2f) * 40f);
+                          tp.setTextAlign(Paint.Align.LEFT);
+                          c.drawText(np, boxL - off, npY + 12, tp);
+                          tp.setTextAlign(Paint.Align.RIGHT);
+                          c.restore();
+                      }
                   }
                   c.restore();
 
@@ -4578,12 +4690,12 @@ jobs:
 
               /** The CD player up close: what's playing, plus buttons. */
               void drawPlayerPanel(Canvas c) {
-                  c.drawColor(0x66000000);
+                  c.drawColor(0x33000000);
                   Disc d = nowDisc;
                   float w = 760, h = 300;
                   float l = (VW - w) / 2, t = VH - h - 30;
                   rf.set(l, t, l + w, t + h);
-                  p.setColor(0xf0161d29);
+                  p.setColor(0xc4161d29);
                   c.drawRoundRect(rf, 28, 28, p);
                   boolean playing = d != null && radioBusy();
                   if (d != null) {
