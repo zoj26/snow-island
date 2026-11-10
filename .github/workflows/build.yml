@@ -2121,19 +2121,25 @@ jobs:
                   // Ice blocks laid in rings that follow the round floor: flat across the back wall,
                   // curving down toward the floor at the sides, like the inside of a dome
                   float ecx = 640, ecy = 720;
+                  Random wr = new Random(7);
                   for (int i = 1; i <= 9; i++) {
                       float ra = ROOM_FA + i * 62, rb = ROOM_FB + i * 54;
+                      float pa = ROOM_FA + (i - 1) * 62, pb = ROOM_FB + (i - 1) * 54;
                       rf.set(ecx - ra, ecy - rb, ecx + ra, ecy + rb);
                       c.drawArc(rf, 180, 180, false, w);
-                      float pa = ROOM_FA + (i - 1) * 62, pb = ROOM_FB + (i - 1) * 54;
-                      int joints = 16 + i * 2;
-                      for (int j = 0; j <= joints; j++) {
-                          double ang = Math.PI + Math.PI * (j + (i % 2) * 0.5) / joints;
-                          if (ang > 2 * Math.PI) continue;
+                      // joints spaced by brick length (not by angle), each row shifted randomly,
+                      // so they don't line up into spokes
+                      float ma = (ra + pa) / 2, mb = (rb + pb) / 2;
+                      double half = Math.PI * Math.sqrt((ma * ma + mb * mb) / 2);
+                      int joints = Math.max(6, (int) (half / 105));
+                      float off = wr.nextFloat();
+                      for (int j = 0; j < joints; j++) {
+                          double ang = Math.PI + Math.PI * (j + off) / joints;
                           float cs = (float) Math.cos(ang), sn = (float) Math.sin(ang);
                           c.drawLine(ecx + cs * pa, ecy + sn * pb, ecx + cs * ra, ecy + sn * rb, w);
                       }
                   }
+                  w.setStyle(Paint.Style.FILL);
                   // Floor
                   w.setShader(new LinearGradient(0, 270, 0, VH, 0xfff4f8fb, 0xffdde9f1, Shader.TileMode.CLAMP));
                   rf.set(640 - ROOM_FA, 720 - ROOM_FB, 640 + ROOM_FA, 720 + ROOM_FB);
