@@ -280,7 +280,8 @@ jobs:
               static final float CD_X = IGLOO_X - 258, CD_Y = IGLOO_Y + 18;
               // Ezio's bed, off to the side of the lawn chairs
               static final float BED_X = IGLOO_X + 310, BED_Y = IGLOO_Y + 140;
-              static final float ROOM_BED_X = 805, ROOM_BED_Y = 356;      // his bed inside, right of the fireplace
+              static final float ROOM_BED_X = 838, ROOM_BED_Y = 306;      // his bed inside, on the hearth right of the fireplace
+              static final float CUSHION_X = 475, CUSHION_Y = 350;         // the teal cushion on the left, his other napping spot
 
               // YouTube playlists that come with the island. To add one: {"Name", "playlist id", "colour"}
               static final String[][] YT_DISCS = {
@@ -298,7 +299,7 @@ jobs:
               static final String[] SEASON_PREF_NAMES = {"Auto", "Christmas", "Halloween", "Valentine's", "New Year", "Off"};
 
               // Sound ids
-              static final int S_STEP = 0, S_CHIRP = 1, S_OPEN = 2, S_WHOOSH = 3, S_SPLAT = 4, S_TICK = 5, S_TOGGLE = 6, S_DOOR = 7, S_CRACKLE = 8;
+              static final int S_STEP = 0, S_CHIRP = 1, S_OPEN = 2, S_WHOOSH = 3, S_SPLAT = 4, S_TICK = 5, S_TOGGLE = 6, S_DOOR = 7, S_CRACKLE = 8, S_WHISTLE = 9;
 
               static final int[] SCARVES = {
                       0xffe53935, 0xff1e88e5, 0xff43a047, 0xfffdd835, 0xff8e24aa,
@@ -310,9 +311,9 @@ jobs:
               static final String[] CHAT_BITS = {"…", "♪", "♥", "?", "!", "★", "☺", "❄", "ha ha", "!!", "hm?", "♫", "ooh", "…!"};
               static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
 
-              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "🙈", "⚙️", "🎵"};
-              static final int WN = 10, W_MUSIC = 9, W_REMOTE = 5, W_EZIO = 6;
-              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Belly slide", "CD remote", "Ezio", "Apps", "Island settings", "Music"};
+              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "📯", "🙈", "⚙️", "🎵"};
+              static final int WN = 11, W_MUSIC = 10, W_REMOTE = 5, W_EZIO = 6, W_WHISTLE = 7;
+              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Slide", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music"};
 
               static class AppPeng {
                   String pkg, label;
@@ -326,6 +327,7 @@ jobs:
                   float emoteT, emoteDur, emoteDelay;
                   float hitT, throwBackT, ballT, hugX, hugY;
                   boolean hugWalk;
+                  float rallyX, rallyY;
                   AppPeng joinOf;      // joined someone else's conversation
                   int joinSlot;
                   float joinSpeakT;
@@ -427,7 +429,8 @@ jobs:
               boolean shuffleOn;
               volatile boolean ytSawDiscSong, ytShuffleSent;
               volatile String ytLastTitle;
-              volatile long ytUserSkipAt, ytJumpUntil, ytPrevPos, ytPrevDur;
+              volatile long ytUserSkipAt, ytJumpUntil, ytPrevPos, ytPrevDur, ytTitleSince;
+              final ArrayList<Integer> ytHistory = new ArrayList<>();
               volatile long progPos, progDur, progAt;
               volatile boolean progPlaying;
               int playerRow;
@@ -438,7 +441,7 @@ jobs:
               int navDir = -1;
               float navT;
               boolean wasMenu;
-              float afkT, afkDim, nextHeartFx, nextSmoke;
+              float afkT, afkDim, nextHeartFx, nextSmoke, rallyT;
               int lastCamX = -1, lastCamY = -1;
               float[] drX, drY, drS, drR;
               Bitmap iglooBmp;
@@ -492,7 +495,9 @@ jobs:
               boolean bellyIcons;
               float[] emberX, emberY, emberPh;
               Bitmap fireBg, glowBmp, doorGlow;
-              final float[] lickX = new float[10], lickY = new float[10], lickSize = new float[10], lickLife = new float[10], lickMax = new float[10];
+              final float[] flameH = {0.7f, 0.7f, 0.7f, 0.8f, 0.9f, 1f, 0.9f, 0.8f, 0.7f, 0.7f, 0.7f}, flameTarget = new float[11], flameT = new float[11];
+              float fireLean;
+              final float[] lickX = new float[10], lickY = new float[10], lickSize = new float[10], lickLife = new float[10], lickMax = new float[10], lickShape = new float[10];
               Path fireArch;
               final Map<String, AppPeng> byPkg = new HashMap<>();
               float[] waveX, waveY, wavePh;
@@ -515,7 +520,7 @@ jobs:
 
               // Audio
               SoundPool sounds;
-              final int[] soundIds = new int[9];
+              final int[] soundIds = new int[10];
               MediaPlayer music;
               volatile boolean resumed;
 
@@ -701,7 +706,7 @@ jobs:
                   }
                   new Thread(() -> {
                       File dir = getFilesDir();
-                      String[] names = {"step", "chirp", "open", "whoosh", "splat", "tick", "toggle", "door", "crackle"};
+                      String[] names = {"step", "chirp", "open", "whoosh", "splat", "tick", "toggle", "door", "crackle", "whistle"};
                       for (int i = 0; i < names.length; i++) {
                           try {
                               // Your own fire recording (fire.ogg in the repo) is used if it's there
@@ -721,6 +726,7 @@ jobs:
                                       case 5: data = Synth.tick(); break;
                                       case 6: data = Synth.toggle(); break;
                                       case 7: data = Synth.door(); break;
+                                      case 9: data = Synth.whistle(); break;
                                       default: data = Synth.crackle(); break;
                                   }
                                   Synth.writeWav(f, data);
@@ -1005,6 +1011,33 @@ jobs:
                   } catch (Exception ignored) { }
               }
 
+              /**
+               * A random song to shuffle to, within 12 songs either way (SmartTube can only move one song
+               * at a time, so very far jumps would take too long).
+               */
+              int randomTrackNear(Disc d, int cur) {
+                  int n = d.tracks.size();
+                  int lo = Math.max(0, cur - 12), hi = Math.min(n - 1, cur + 12);
+                  if (hi <= lo) return cur;
+                  int t2 = cur;
+                  while (t2 == cur) t2 = lo + rnd.nextInt(hi - lo + 1);
+                  return t2;
+              }
+
+              /** Skip SmartTube from song `from` to song `to`, one quick step at a time. */
+              void ytJumpTo(MediaController mc, int from, int to, long now) {
+                  final int delta = to - from;
+                  if (delta == 0) return;
+                  ytJumpUntil = now + 3000 + Math.abs(delta) * 400L;
+                  ytUserSkipAt = now;
+                  new Thread(() -> {
+                      for (int k = 0; k < Math.abs(delta); k++) {
+                          try { Thread.sleep(320); } catch (InterruptedException ignored) { }
+                          try { if (delta > 0) mc.getTransportControls().skipToNext(); else mc.getTransportControls().skipToPrevious(); } catch (Exception ignored) { }
+                      }
+                  }, "island-shuffle").start();
+              }
+
               /** Where a song title sits in the disc's song list, or -1. */
               static int trackIndex(Disc d, String title) {
                   ArrayList<String[]> tr = d.tracks;
@@ -1083,13 +1116,29 @@ jobs:
                       ytUserSkipAt = System.currentTimeMillis();
                       MediaController mc = smartTubeSession();
                       boolean done = false;
-                      if (mc != null) {
+                      Disc sd = nowDisc;
+                      if (shuffleOn && mc != null && sd != null && sd.tracks != null) {
+                          // Shuffle on: next picks a random song, back returns to the one before it
+                          int curIdx = trackIndex(sd, nowTitle);
+                          if (curIdx >= 0) {
+                              long now = System.currentTimeMillis();
+                              if (dir > 0) {
+                                  ytHistory.add(curIdx);
+                                  ytJumpTo(mc, curIdx, randomTrackNear(sd, curIdx), now);
+                                  done = true;
+                              } else if (!ytHistory.isEmpty()) {
+                                  ytJumpTo(mc, curIdx, ytHistory.remove(ytHistory.size() - 1), now);
+                                  done = true;
+                              }
+                          }
+                      }
+                      if (mc != null && !done) {
                           try {
                               if (dir > 0) mc.getTransportControls().skipToNext(); else mc.getTransportControls().skipToPrevious();
                               done = true;
                           } catch (Exception ignored) { }
                       }
-                      if (!done) mediaKey(dir > 0 ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+                      if (!done && mc == null) mediaKey(dir > 0 ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
                       radioPaused = false;
                       ytUserPaused = false;
                       ytGraceUntil = System.currentTimeMillis() + 8000;
@@ -1175,6 +1224,7 @@ jobs:
                   ytSawDiscSong = false;
                   ytShuffleSent = false;
                   ytLastTitle = null;
+                  ytHistory.clear();
                   updateMusic();
                   if (d.tracks == null) new Thread(() -> fetchTracks(d), "island-tracks").start();
                   int index = 1;
@@ -1440,27 +1490,19 @@ jobs:
                                           ytSawDiscSong = true;
                                           // Shuffle: when SmartTube moves on to the next song by itself, jump to a random one instead
                                           // (only when the song before had actually played to its end, so our own skips don't trigger more skips)
-                                          boolean finished = ytPrevDur > 0 && ytPrevPos >= ytPrevDur - 9000;
+                                          long onFor = now - ytTitleSince;
+                                          boolean finished = ytPrevDur > 0 ? onFor >= ytPrevDur - 15000 : onFor >= 60000;
                                           if (shuffleOn && ytLastTitle != null && !title.equals(ytLastTitle) && finished
                                                   && now - ytUserSkipAt > 6000 && now > ytJumpUntil) {
                                               int cur2 = trackIndex(cur, title);
-                                              int n2 = cur.tracks.size();
-                                              if (cur2 >= 0 && n2 > 2) {
-                                                  int target = cur2;
-                                                  while (target == cur2) target = rnd.nextInt(n2);
-                                                  final int delta = target - cur2;
-                                                  final MediaController jm = mc;
-                                                  ytJumpUntil = now + 4000 + Math.abs(delta) * 700L;
-                                                  new Thread(() -> {
-                                                      for (int k = 0; k < Math.abs(delta); k++) {
-                                                          try { Thread.sleep(450); } catch (InterruptedException ignored) { }
-                                                          try { if (delta > 0) jm.getTransportControls().skipToNext(); else jm.getTransportControls().skipToPrevious(); } catch (Exception ignored) { }
-                                                      }
-                                                  }, "island-shuffle").start();
+                                              if (cur2 >= 0) {
+                                                  int prevIdx = trackIndex(cur, ytLastTitle);
+                                                  if (prevIdx >= 0) ytHistory.add(prevIdx);
+                                                  ytJumpTo(mc, cur2, randomTrackNear(cur, cur2), now);
                                               }
                                           }
                                           if (!title.equals(ytLastTitle)) { ytPrevPos = 0; ytPrevDur = 0; }
-                                          if (now > ytJumpUntil) ytLastTitle = title;
+                                          if (now > ytJumpUntil && !title.equals(ytLastTitle)) { ytLastTitle = title; ytTitleSince = now; }
                                           if (title.equals(ytLastTitle)) { ytPrevPos = livePos; ytPrevDur = dur; }
                                       } else if (ytSawDiscSong) {
                                           // SmartTube ran past the last song into its own suggestions: the disc is over
@@ -2071,11 +2113,11 @@ jobs:
                   }
                   // Stone hearth slab under the fireplace, flush with the floor
                   w.setColor(0xff6b7a85);
-                  rf.set(470, 294, 810, 316);
-                  c.drawRoundRect(rf, 6, 6, w);
+                  rf.set(462, 292, 900, 330);
+                  c.drawRoundRect(rf, 7, 7, w);
                   w.setColor(0xff8496a2);
-                  rf.set(470, 294, 810, 301);
-                  c.drawRoundRect(rf, 4, 4, w);
+                  rf.set(462, 292, 900, 302);
+                  c.drawRoundRect(rf, 5, 5, w);
                   // Cushion by the fire (Ezio's bed is on the other side)
                   w.setColor(0xff26a69a);
                   c.drawOval(430, 330, 520, 365, w);
@@ -2486,7 +2528,32 @@ jobs:
 
               void updateIsland(float dt, List<AppPeng> list) {
                   boolean playerMoving = kUp || kDown || kLeft || kRight || axX != 0 || axY != 0;
+                  if (rallyT > 0) {
+                      rallyT -= dt;
+                      if (rallyT <= 0) {
+                          for (AppPeng a : list) { a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 80; a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 50; a.wait = 0; }
+                      }
+                  }
                   for (AppPeng a : list) {
+                      if (rallyT > 0) {
+                          // rush to their spot in the circle, then stand still facing you
+                          a.blinkT = Math.max(0, a.blinkT - dt);
+                          a.nextBlink -= dt;
+                          if (a.nextBlink <= 0) { a.blinkT = 0.13f; a.nextBlink = 2 + rnd.nextFloat() * 5; }
+                          float dx = a.rallyX - a.x, dy = a.rallyY - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
+                          if (d > 3) {
+                              float stp = Math.min(d, 210 * dt);
+                              a.x += dx / d * stp; a.y += dy / d * stp;
+                              a.moving = true;
+                              a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
+                              a.phase += dt * 12f;
+                          } else {
+                              a.moving = false;
+                              a.facing = faceToward(a.x, a.y, px, py);
+                              a.phase += dt * 3f;
+                          }
+                          continue;
+                      }
                       if (a.hugWalk) {
                           if (playerMoving) { a.hugWalk = false; }
                           else {
@@ -2554,6 +2621,27 @@ jobs:
 
                       npcThink(a, dt, list);
                       a.phase += dt * (a.moving ? 10f : 3f);
+                  }
+
+                  // Nobody walks through the igloo or the boombox: anyone inside the base gets nudged back out
+                  for (AppPeng a : list) {
+                      float ix = (a.x - IGLOO_X) / 140f, iy = (a.y - (IGLOO_Y - 22)) / 40f;
+                      float ie = ix * ix + iy * iy;
+                      if (ie < 1) {
+                          float k = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f)));
+                          a.x = IGLOO_X + (a.x - IGLOO_X) * k;
+                          a.y = (IGLOO_Y - 22) + (a.y - (IGLOO_Y - 22)) * k;
+                          // and if they were headed through it, send them around instead
+                          float tix = (a.tx - IGLOO_X) / 150f, tiy = (a.ty - (IGLOO_Y - 22)) / 46f;
+                          if (tix * tix + tiy * tiy < 1) a.ty = a.y < IGLOO_Y - 22 ? IGLOO_Y - 80 : IGLOO_Y + 40;
+                      }
+                      float cx2 = (a.x - CD_X) / 48f, cy2 = (a.y - (CD_Y - 5)) / 18f;
+                      float ce = cx2 * cx2 + cy2 * cy2;
+                      if (ce < 1) {
+                          float k = (float) (1 / Math.sqrt(Math.max(ce, 0.0001f)));
+                          a.x = CD_X + (a.x - CD_X) * k;
+                          a.y = (CD_Y - 5) + (a.y - (CD_Y - 5)) * k;
+                      }
                   }
 
                   // Snowballs
@@ -2765,6 +2853,9 @@ jobs:
                   AppPeng o = best;
                   float mx = (a.x + o.x) / 2, my = (a.y + o.y) / 2;
                   AppPeng leftOne = a.x <= o.x ? a : o, rightOne = leftOne == a ? o : a;
+                  // meet somewhere that isn't inside the igloo
+                  float mix = (mx - IGLOO_X) / 190f, miy = (my - (IGLOO_Y - 22)) / 70f;
+                  if (mix * mix + miy * miy < 1) my = my < IGLOO_Y - 22 ? IGLOO_Y - 100 : IGLOO_Y + 60;
                   leftOne.tx = mx - 30; rightOne.tx = mx + 30;
                   leftOne.ty = rightOne.ty = my;
                   a.chatWith = o; o.chatWith = a;
@@ -2799,18 +2890,37 @@ jobs:
 
               void updateFire(float dt) {
                   fireHintT += dt;
+                  // whole-fire sway, slow and gentle
+                  fireLean = (float) Math.sin(time * 1.3f) * 9 + (float) Math.sin(time * 2.9f + 1) * 5;
+                  // each flame picks a new height every so often and eases toward it; middle flames reach higher
+                  for (int i = 0; i < 11; i++) {
+                      flameT[i] -= dt;
+                      if (flameT[i] <= 0) {
+                          float centre = 1 - Math.abs(i - 5) / 5f;          // 1 in the middle, 0 at the edges
+                          float lo = 0.5f + 0.15f * centre, hi = 0.85f + 0.45f * centre;
+                          flameTarget[i] = lo + rnd.nextFloat() * (hi - lo);
+                          flameT[i] = 0.35f + rnd.nextFloat() * 0.9f;
+                      }
+                      flameH[i] += (flameTarget[i] - flameH[i]) * Math.min(1, dt * 3.2f);
+                  }
+                  updateFireEzio(dt);
                   // flame licks: spawn near the flame tips, rise and shrink
                   for (int k = 0; k < lickX.length; k++) {
                       if (lickLife[k] > 0) {
                           lickLife[k] -= dt;
                           lickY[k] -= (70 + lickSize[k] * 3) * dt;
                           lickX[k] += (float) Math.sin(time * 6 + k) * 18 * dt;
-                      } else if (rnd.nextFloat() < dt * 0.9f) {
+                      } else if (rnd.nextFloat() < dt * 0.22f) {
+                          // break off the tip of one of the flames, right where it is this moment
                           int i = 2 + rnd.nextInt(7);
-                          lickX[k] = 640 + (i - 5) * 33 + (rnd.nextFloat() - 0.5f) * 20;
-                          lickY[k] = 596 - 150 * (1 - Math.abs(i - 5) / 7f) - rnd.nextFloat() * 40;
-                          lickSize[k] = 6 + rnd.nextFloat() * 7;
-                          lickMax[k] = lickLife[k] = 0.35f + rnd.nextFloat() * 0.35f;
+                          float base = 250 * (1 - Math.abs(i - 5) / 7f);
+                          float n = flameH[i];
+                          float lean = fireLean * (0.6f + 0.4f * (1 - Math.abs(i - 5) / 5f));
+                          lickX[k] = 640 + (i - 5) * 33 + lean;
+                          lickY[k] = 596 - base * n * 0.92f;
+                          lickSize[k] = 4 + rnd.nextFloat() * 6;
+                          lickShape[k] = rnd.nextFloat();
+                          lickMax[k] = lickLife[k] = 0.3f + rnd.nextFloat() * 0.35f;
                       }
                   }
                   // A few stray sparks drifting up
@@ -2850,6 +2960,89 @@ jobs:
                           q.max = q.life = 1.6f + rnd.nextFloat() * 1.4f; q.grow = -1.5f;
                       }
                   }
+              }
+
+              // Ezio in the fireplace view: 0 sitting on his bed, 1 asleep on it, 2 walking/running, 3 standing about
+              static final float FX_BED = 1150;
+              float fxX = FX_BED, fxTarget, fxT;
+              int fxState, fxFacing = LEFT, fxNext;
+              boolean fxRun;
+
+              void startFireEzio() {
+                  fxX = FX_BED;
+                  fxFacing = LEFT;
+                  fxState = ezFollow || rnd.nextBoolean() ? 0 : 1;
+                  fxT = 6 + rnd.nextFloat() * 8;
+              }
+
+              void updateFireEzio(float dt) {
+                  if (ezScene != SCENE_IGLOO) return;
+                  fxT -= dt;
+                  if (fxState == 2) {
+                      float d = fxTarget - fxX;
+                      if (Math.abs(d) > 3) {
+                          fxFacing = d < 0 ? LEFT : RIGHT;
+                          fxX += Math.signum(d) * Math.min(Math.abs(d), (fxRun ? 260 : 105) * dt);
+                          ezPhase += dt * (fxRun ? 10 : 0);
+                          return;
+                      }
+                      fxX = fxTarget;
+                      if (Math.abs(fxX - FX_BED) < 4) { fxState = fxNext; fxFacing = LEFT; fxT = 6 + rnd.nextFloat() * 9; }
+                      else { fxState = 3; fxT = 1.5f + rnd.nextFloat() * 3; }
+                      return;
+                  }
+                  if (fxT > 0) return;
+                  float r = rnd.nextFloat();
+                  boolean atBed = Math.abs(fxX - FX_BED) < 8;
+                  if (r < 0.6f) {
+                      // settle on the bed: sit and stare, or curl up and sleep
+                      int want = rnd.nextFloat() < 0.5f ? 0 : 1;
+                      if (atBed) { fxState = want; fxT = 6 + rnd.nextFloat() * 9; }
+                      else { fxNext = want; fxTarget = FX_BED; fxRun = false; fxState = 2; }
+                  } else {
+                      // wander along the hearth, sometimes at a run
+                      fxTarget = 90 + rnd.nextFloat() * 1000;
+                      fxRun = rnd.nextFloat() < 0.3f;
+                      fxState = 2;
+                  }
+              }
+
+              /** Ezio's bed from the side: a soft round bed with raised bolster edges. front=true draws just the front lip. */
+              void drawPetBed(Canvas c, float x, float y, float s, boolean front) {
+                  c.save();
+                  c.translate(x, y);
+                  c.scale(s, s);
+                  if (!front) {
+                      p.setColor(0x33000000);
+                      c.drawOval(-46, -5, 46, 5, p);
+                      // back bolster
+                      p.setColor(0xff9c3d4a);
+                      rf.set(-42, -30, 42, -4);
+                      c.drawRoundRect(rf, 13, 13, p);
+                      p.setColor(0xffb24a57);
+                      rf.set(-40, -30, 40, -18);
+                      c.drawRoundRect(rf, 8, 8, p);
+                      // inside cushion
+                      p.setColor(0xfff1e3d3);
+                      rf.set(-30, -18, 30, -6);
+                      c.drawRoundRect(rf, 6, 6, p);
+                      // side bolsters
+                      p.setColor(0xffa8424f);
+                      c.drawCircle(-36, -12, 11, p);
+                      c.drawCircle(36, -12, 11, p);
+                  } else {
+                      // front lip (drawn over him when he's in the bed)
+                      p.setColor(0xffb24a57);
+                      rf.set(-40, -12, 40, 2);
+                      c.drawRoundRect(rf, 7, 7, p);
+                      p.setColor(0xffc95e6b);
+                      rf.set(-38, -12, 38, -7);
+                      c.drawRoundRect(rf, 4, 4, p);
+                      p.setColor(0xffa8424f);
+                      c.drawCircle(-36, -6, 8, p);
+                      c.drawCircle(36, -6, 8, p);
+                  }
+                  c.restore();
               }
 
               void spark(float x, float y, boolean pop) {
@@ -3025,18 +3218,17 @@ jobs:
                   }
                   if (overlay == OV_PLAYER) {
                       if (back || menu) { overlay = OV_NONE; play(S_TICK, 0.4f, 0.8f); return; }
-                      // Down to the volume slider, up back to the buttons
-                      if (code == KeyEvent.KEYCODE_DPAD_DOWN && playerRow == 0) { playerRow = 1; play(S_TICK, 0.35f, 0.9f); return; }
-                      if (code == KeyEvent.KEYCODE_DPAD_UP && playerRow == 1) { playerRow = 0; play(S_TICK, 0.35f, 1.1f); return; }
+                      // The volume slider stands on the left: Left from the first button reaches it, Up/Down set it, Right goes back
                       if (playerRow == 1) {
-                          if (code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_DPAD_LEFT) {
-                              setCdVolume(cdVolume + (code == KeyEvent.KEYCODE_DPAD_RIGHT ? 0.05f : -0.05f));
+                          if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN) {
+                              setCdVolume(cdVolume + (code == KeyEvent.KEYCODE_DPAD_UP ? 0.05f : -0.05f));
                               play(S_TICK, 0.3f * cdVolume + 0.05f, 0.8f + cdVolume * 0.6f);
-                          }
+                          } else if (code == KeyEvent.KEYCODE_DPAD_RIGHT) { playerRow = 0; playerSel = 0; play(S_TICK, 0.35f, 1.1f); }
                           return;
                       }
-                      if (code == KeyEvent.KEYCODE_DPAD_RIGHT) { playerSel = (playerSel + 1) % PLAYER_BTNS.length; play(S_TICK, 0.35f, 1f); }
-                      else if (code == KeyEvent.KEYCODE_DPAD_LEFT) { playerSel = (playerSel + PLAYER_BTNS.length - 1) % PLAYER_BTNS.length; play(S_TICK, 0.35f, 1f); }
+                      if (code == KeyEvent.KEYCODE_DPAD_LEFT && playerSel == 0) { playerRow = 1; play(S_TICK, 0.35f, 0.9f); return; }
+                      if (code == KeyEvent.KEYCODE_DPAD_RIGHT) { playerSel = Math.min(PLAYER_BTNS.length - 1, playerSel + 1); play(S_TICK, 0.35f, 1f); }
+                      else if (code == KeyEvent.KEYCODE_DPAD_LEFT) { playerSel = Math.max(0, playerSel - 1); play(S_TICK, 0.35f, 1f); }
                       else if (ok && !repeat) {
                           switch (playerSel) {
                               case 0: radioSkip(-1); break;
@@ -3123,13 +3315,43 @@ jobs:
                           else toast("No disc playing. Walk over to the boombox to put one on.");
                           break;
                       case 6: toggleEzio(); break;
-                      case 7: openAppsList(null); break;
-                      case 8: openSettings(); break;
-                      case 9: setMusic(!musicOn); break;
+                      case 7: blowWhistle(); break;
+                      case 8: openAppsList(null); break;
+                      case 9: openSettings(); break;
+                      case 10: setMusic(!musicOn); break;
                   }
               }
 
               /** Two penguins step in and hug. */
+              /**
+               * Blow the whistle: every penguin rushes over and stands in a loose circle around you for
+               * a few seconds, so you can pick one; then they all go back to what they were doing.
+               */
+              void blowWhistle() {
+                  if (scene != SCENE_ISLAND) { toast("The penguins can't hear you in here"); return; }
+                  List<AppPeng> list = apps;
+                  int n = list.size();
+                  if (n == 0) return;
+                  play(S_WHISTLE, 0.55f, 1f);
+                  rallyT = 9f;
+                  float rx = Math.max(210, n * 15), ry = rx * 0.6f;
+                  for (int k = 0; k < n; k++) {
+                      AppPeng a = list.get(k);
+                      if (a.chatWith != null) endChat(a);
+                      if (a.joinOf != null) leaveGroup(a);
+                      a.hugWalk = false;
+                      double ang = Math.PI * 2 * k / n - Math.PI / 2;
+                      float gx = px + (float) Math.cos(ang) * rx, gy = py + (float) Math.sin(ang) * ry;
+                      float ex = (gx - CX) / (RX - 50), ey = (gy - CY) / (RY - 45);
+                      float e = ex * ex + ey * ey;
+                      if (e > 1) { float kk = (float) (1 / Math.sqrt(e)); gx = CX + (gx - CX) * kk; gy = CY + (gy - CY) * kk; }
+                      float ix = (gx - IGLOO_X) / 150f, iy = (gy - (IGLOO_Y - 22)) / 50f;
+                      if (ix * ix + iy * iy < 1) gy = gy < IGLOO_Y - 22 ? IGLOO_Y - 85 : IGLOO_Y + 45;
+                      a.rallyX = gx; a.rallyY = gy;
+                      a.emote = E_NONE;
+                  }
+              }
+
               void hugPair(AppPeng a, AppPeng o) {
                   AppPeng l = a.x <= o.x ? a : o, r = l == a ? o : a;
                   float mx = (l.x + r.x) / 2, my = (l.y + r.y) / 2;
@@ -3217,6 +3439,7 @@ jobs:
                   lastCamX = -1;
                   if (s == SCENE_FIRE) {
                       fireHintT = 0;
+                      startFireEzio();
                       parts.clear();
                       startCrackle();
                   } else if (s == SCENE_IGLOO) {
@@ -3333,7 +3556,8 @@ jobs:
                               ezVisiting = true; ezLeaving = false; ezSleeping = false;
                               ezStayT = 45 + rnd.nextFloat() * 55;
                               ezGoBed = true;
-                              ezTX = ROOM_BED_X; ezTY = ROOM_BED_Y + 2;
+                              if (rnd.nextBoolean()) { ezTX = ROOM_BED_X; ezTY = ROOM_BED_Y + 2; }
+                              else { ezTX = CUSHION_X; ezTY = CUSHION_Y; }
                               ezWait = 0;
                           }
                       } else if (ps == SCENE_ISLAND && ezReturnT > 0) {
@@ -3447,9 +3671,10 @@ jobs:
                       return;
                   }
                   if (inside && !ezGoBed && rnd.nextFloat() < 0.5f) {
-                      // head to his bed by the fire for a nap
+                      // nap time: his bed on the hearth, or the cushion on the other side
                       ezGoBed = true;
-                      ezTX = ROOM_BED_X; ezTY = ROOM_BED_Y + 2;
+                      if (rnd.nextBoolean()) { ezTX = ROOM_BED_X; ezTY = ROOM_BED_Y + 2; }
+                      else { ezTX = CUSHION_X; ezTY = CUSHION_Y; }
                       return;
                   }
                   if (ezGoBed) {
@@ -3485,7 +3710,7 @@ jobs:
                   float nx = ezX + ux * len, ny = ezY + uy * len;
                   if (inside) {
                       nx = Math.max(170, Math.min(1110, nx));
-                      ny = Math.max(nx > 380 && nx < 900 ? 345 : 400, Math.min(705, ny));
+                      ny = Math.max(nx > 780 && nx < 900 ? 300 : nx > 380 && nx < 900 ? 345 : 400, Math.min(705, ny));
                   } else {
                       float ex = (nx - CX) / (RX - 45), ey = (ny - CY) / (RY - 40);
                       float e = ex * ex + ey * ey;
@@ -5054,16 +5279,27 @@ jobs:
                       for (float x = bL + (row % 2) * 24; x < bR; x += 48) c.drawLine(x, y, x, y + 22, w);
                   }
                   c.restore();
-                  // the throat of the chimney: a dark opening above the back wall, so it goes somewhere
-                  Path throat = new Path();
-                  throat.moveTo(565, bTop + 12);
-                  throat.lineTo(715, bTop + 12);
-                  throat.lineTo(790, oTop - 4);
-                  throat.lineTo(490, oTop - 4);
-                  throat.close();
-                  w.setShader(new LinearGradient(0, oTop, 0, bTop + 12, 0xff030201, 0xff20140f, Shader.TileMode.CLAMP));
-                  c.drawPath(throat, w);
+                  // the ceiling of the firebox (lit warm by the fire), with the chimney's dark throat in the middle
+                  Path ceil = new Path();
+                  ceil.moveTo(oL, oTop + 60);
+                  rf.set(oL, oTop, oR, oTop + 280);
+                  ceil.arcTo(rf, 180, 180, false);
+                  ceil.lineTo(oR, oTop + 60);
+                  ceil.lineTo(bR, bTop + 40);
+                  rf.set(bL, bTop, bR, bTop + 150);
+                  ceil.arcTo(rf, 0, -180, false);
+                  ceil.close();
+                  w.setShader(new LinearGradient(0, oTop, 0, bTop + 40, 0xff3b271e, 0xff5a3a2a, Shader.TileMode.CLAMP));
+                  c.drawPath(ceil, w);
                   w.setShader(null);
+                  // the hole up into the chimney: black, fading out softly at its edges
+                  for (int k = 0; k < 6; k++) {
+                      float f = k / 5f;
+                      float hw = 120 - f * 55, top = oTop + 6, bot = bTop + 6 - f * 30;
+                      rf.set(640 - hw, top, 640 + hw, bot);
+                      w.setColor(((int) (60 + f * 195)) << 24 | 0x050302);
+                      c.drawRoundRect(rf, hw * 0.6f, 30, w);
+                  }
                   // brick lines on the side walls, slanting toward the back
                   w.setColor(0xff1f150f);
                   for (int k = 1; k < 9; k++) {
@@ -5082,15 +5318,15 @@ jobs:
                   w.setStyle(Paint.Style.FILL);
 
                   // snowy igloo floor, and a thick stone hearth bar running the full width
-                  w.setShader(new LinearGradient(0, 690, 0, VH, 0xfff4f8fb, 0xffdde9f1, Shader.TileMode.CLAMP));
-                  c.drawRect(0, 690, VW, VH, w);
+                  w.setShader(new LinearGradient(0, 708, 0, VH, 0xfff4f8fb, 0xffdde9f1, Shader.TileMode.CLAMP));
+                  c.drawRect(0, 708, VW, VH, w);
                   w.setShader(null);
                   w.setColor(0xff4a4441);
-                  c.drawRect(0, 636, VW, 694, w);
+                  c.drawRect(0, 636, VW, 710, w);
                   w.setColor(0xff5b5450);
-                  c.drawRect(0, 636, VW, 650, w);
+                  c.drawRect(0, 636, VW, 652, w);
                   w.setColor(0xff3a3431);
-                  c.drawRect(0, 690, VW, 696, w);
+                  c.drawRect(0, 704, VW, 712, w);
 
                   // thick wooden mantle that overhangs the stone on both sides
                   w.setColor(0x55000000);
@@ -5159,14 +5395,14 @@ jobs:
                       p.setColor(cols[layer]);
                       float ls = scales[layer];
                       for (int i = 0; i < 11; i++) {
+                          // Each flame grows and shrinks on its own (flameH), the middle ones reaching highest,
+                          // while the whole fire sways together as one, so it stays one cohesive fire
                           float base = 250 * (1 - Math.abs(i - 5) / 7f);
-                          float n = 0.62f + 0.22f * (float) Math.sin(time * 3.1f + i * 1.7f)
-                                  + 0.12f * (float) Math.sin(time * 7.3f + i * 3.1f)
-                                  + 0.07f * (float) Math.sin(time * 13.7f + i * 0.9f);
+                          float n = flameH[i] + 0.05f * (float) Math.sin(time * 9.1f + i * 2.3f);
                           float hgt = base * n * (0.55f + 0.45f * ls) * (layer == 3 ? 0.6f : 1f);
-                          float w = 40 * ls + 5;
+                          float w = 47 * ls + 6;
                           float fx = 640 + (i - 5) * 33;
-                          float lean = (float) Math.sin(time * 2.3f + i) * 14 + (float) Math.sin(time * 5.1f + i * 2) * 5;
+                          float lean = fireLean * (0.6f + 0.4f * (1 - Math.abs(i - 5) / 5f)) + (float) Math.sin(time * 3.7f + i * 1.9f) * 4;
                           // A wiggle that travels up the flame, so it ripples and licks instead of just stretching
                           path.reset();
                           final int SEG = 7;
@@ -5174,10 +5410,10 @@ jobs:
                           for (int j = 0; j <= SEG; j++) {
                               float u = j / (float) SEG;
                               ys[j] = by - hgt * u;
-                              float wave = (float) Math.sin(time * 7.5f - u * 5.5f + i * 1.3f + layer) * w * 0.55f * u;
-                              float wave2 = (float) Math.sin(time * 12.3f - u * 9f + i * 2.1f) * w * 0.18f * u;
+                              float wave = (float) Math.sin(time * 6.5f - u * 3.5f + i * 0.6f) * w * 0.1f * u;
+                              float wave2 = 0;
                               cxs[j] = fx + lean * (float) Math.pow(u, 1.4) + wave + wave2;
-                              hws[j] = w * (1 - (float) Math.pow(u, 1.25)) * (1 + 0.12f * (float) Math.sin(time * 9 + u * 6 + i));
+                              hws[j] = w * (1 - (float) Math.pow(u, 1.15)) * (1 + 0.06f * (float) Math.sin(time * 7 + u * 5 + i));
                           }
                           path.moveTo(cxs[0] - hws[0], ys[0]);
                           for (int j = 1; j <= SEG; j++) path.lineTo(cxs[j] - hws[j], ys[j]);
@@ -5193,11 +5429,14 @@ jobs:
                       float f = lickLife[k] / lickMax[k];
                       float sz = lickSize[k] * f;
                       p.setColor(f > 0.6f ? 0xf0ffca28 : f > 0.3f ? 0xe6ff8f00 : 0xd9ff3d00);
+                      // each one a bit different: some tall and thin, some round and stubby, some leaning
+                      float tall = 1.4f + lickShape[k] * 1.6f, wide = 0.9f - lickShape[k] * 0.4f;
+                      float tilt = (float) Math.sin(k * 2.7f + lickMax[k] * 10) * sz * 0.8f;
                       path.reset();
-                      path.moveTo(lickX[k] - sz * 0.6f, lickY[k]);
-                      path.quadTo(lickX[k] - sz * 0.5f, lickY[k] - sz * 1.2f, lickX[k], lickY[k] - sz * 2.2f);
-                      path.quadTo(lickX[k] + sz * 0.5f, lickY[k] - sz * 1.2f, lickX[k] + sz * 0.6f, lickY[k]);
-                      path.close();
+                      path.moveTo(lickX[k] - sz * wide, lickY[k]);
+                      path.quadTo(lickX[k] - sz * wide * 0.8f, lickY[k] - sz * tall * 0.6f, lickX[k] + tilt, lickY[k] - sz * tall);
+                      path.quadTo(lickX[k] + sz * wide * 0.8f, lickY[k] - sz * tall * 0.6f, lickX[k] + sz * wide, lickY[k]);
+                      path.quadTo(lickX[k], lickY[k] + sz * 0.5f, lickX[k] - sz * wide, lickY[k]);
                       c.drawPath(path, p);
                   }
 
@@ -5223,12 +5462,12 @@ jobs:
                       drawPumpkin(c, VW - 230, 108, 1);
                   }
 
-                  // Ezio's bed on the hearth, to the right of the opening, and Ezio if he's inside
-                  // (out past the stone front, on the hearth bar, where you drew it)
-                  drawEzioBed(c, 1188, 640, 1.9f);
+                  // Ezio's bed on the hearth bar, out past the stone front, and Ezio doing his thing
+                  drawPetBed(c, FX_BED, 644, 2.5f, false);
                   if (ezScene == SCENE_IGLOO) {
-                      if (ezFollow) drawEzio(c, 1150, 642, 1.9f, LEFT, false, false, ezPhase, ezBlinkT > 0, season);
-                      else drawEzio(c, 1185, 638, 1.9f, LEFT, false, true, ezPhase, ezBlinkT > 0, season);
+                      boolean onBed = Math.abs(fxX - FX_BED) < 8 && (fxState == 0 || fxState == 1);
+                      drawEzio(c, fxX, onBed ? 630 : 640, 2.4f, fxFacing, fxState == 2, fxState == 1, ezPhase, ezBlinkT > 0, season);
+                      if (onBed) drawPetBed(c, FX_BED, 644, 2.5f, true);
                   }
 
                   // overall flicker on the room
@@ -5582,36 +5821,57 @@ jobs:
               void drawPlayerPanel(Canvas c) {
                   c.drawColor(0x33000000);
                   Disc d = nowDisc;
-                  float w = 760, h = 330;
-                  float l = (VW - w) / 2, t = VH - h - 24;
+                  float w = 640, h = 250;
+                  float l = (VW - w) / 2, t = VH - h - 14;
                   rf.set(l, t, l + w, t + h);
                   p.setColor(0xc4161d29);
                   c.drawRoundRect(rf, 28, 28, p);
                   boolean playing = d != null && radioBusy();
+
+                  // vertical volume slider on the left
+                  float vx = l + 38, vTop = t + 44, vBot = t + h - 50;
+                  p.setColor(0xff263142);
+                  rf.set(vx - 4, vTop, vx + 4, vBot);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  float vy = vBot - (vBot - vTop) * cdVolume;
+                  p.setColor(playerRow == 1 ? 0xff2e7dbd : 0xff546e7a);
+                  rf.set(vx - 4, vy, vx + 4, vBot);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  p.setColor(0xffffffff);
+                  c.drawCircle(vx, vy, playerRow == 1 ? 11 : 8, p);
+                  tp.setTextAlign(Paint.Align.CENTER);
+                  tp.setTextSize(18);
+                  tp.setColor(playerRow == 1 ? 0xffffffff : 0xff90a4ae);
+                  c.drawText(cdVolume <= 0 ? "🔇" : cdVolume < 0.5f ? "🔉" : "🔊", vx, t + 32, tp);
+                  tp.setTextSize(13);
+                  tp.setColor(0xff90a4ae);
+                  c.drawText(Math.round(cdVolume * 100) + "%", vx, t + h - 26, tp);
+
+                  // the spinning disc
                   if (d != null) {
                       c.save();
-                      c.rotate(playing ? (time * 140) % 360 : 0, l + 120, t + 112);
-                      drawDisc(c, l + 120, t + 112, 82, d, false);
+                      c.rotate(playing ? (time * 140) % 360 : 0, l + 140, t + 98);
+                      drawDisc(c, l + 140, t + 98, 64, d, false);
                       c.restore();
                   }
-                  float tx = l + 230;
+                  float tx = l + 228;
                   tp.setTextAlign(Paint.Align.LEFT);
-                  tp.setTextSize(28);
+                  tp.setTextSize(25);
                   tp.setColor(0xffffffff);
-                  c.drawText(d != null ? d.name : "No disc", tx, t + 56, tp);
+                  c.drawText(d != null ? d.name : "No disc", tx, t + 48, tp);
                   String nt = nowTitle == null ? "" : nowTitle;
-                  if (nt.length() > 40) nt = nt.substring(0, 39) + "…";
-                  tp.setTextSize(19);
+                  if (nt.length() > 34) nt = nt.substring(0, 33) + "…";
+                  tp.setTextSize(17);
                   tp.setColor(0xffcfd8dc);
-                  c.drawText(nt, tx, t + 88, tp);
-                  tp.setTextSize(15);
+                  c.drawText(nt, tx, t + 76, tp);
+                  tp.setTextSize(14);
                   tp.setColor(playing ? 0xffa5d6a7 : 0xffffcc80);
-                  c.drawText((playing ? "Playing" : "Paused") + (nowYT ? " in SmartTube" : ""), tx, t + 114, tp);
+                  c.drawText((playing ? "Playing" : "Paused") + (nowYT ? " in SmartTube" : ""), tx, t + 98, tp);
 
-                  // progress bar: how far into the song, and how long it is
+                  // progress bar
                   long[] pr = songProgress();
                   if (pr != null && pr[1] > 0) {
-                      float bl = tx, br = l + w - 130, byy = t + 140;
+                      float bl = tx, br = l + w - 110, byy = t + 120;
                       float f = Math.max(0, Math.min(1, pr[0] / (float) pr[1]));
                       p.setColor(0xff263142);
                       rf.set(bl, byy - 3, br, byy + 3);
@@ -5621,58 +5881,62 @@ jobs:
                       c.drawRoundRect(rf, 3, 3, p);
                       c.drawCircle(bl + (br - bl) * f, byy, 6, p);
                       tp.setTextAlign(Paint.Align.LEFT);
-                      tp.setTextSize(14);
+                      tp.setTextSize(13);
                       tp.setColor(0xffb0bec5);
-                      c.drawText(mmss(pr[0]) + " / " + mmss(pr[1]), br + 14, byy + 5, tp);
+                      c.drawText(mmss(pr[0]) + " / " + mmss(pr[1]), br + 12, byy + 5, tp);
                   }
-                  float by = t + 202, gap = 70;
-                  float bx0 = tx + 20;
+
+                  // buttons
+                  float by = t + 178, gap = 52, bx0 = l + 112;
                   for (int i = 0; i < PLAYER_BTNS.length; i++) {
-                      float bx = bx0 + i * gap;
+                      float bx = bx0 + i * gap + (i > 0 ? 18 : 0);
                       p.setColor(i == playerSel && playerRow == 0 ? 0xff2e7dbd : 0xff263142);
-                      c.drawCircle(bx, by, 30, p);
+                      c.drawCircle(bx, by, 23, p);
                       tp.setTextAlign(Paint.Align.CENTER);
-                      tp.setTextSize(i == playerSel ? 28 : 24);
+                      tp.setTextSize(i == playerSel && playerRow == 0 ? 23 : 20);
                       tp.setColor(0xffffffff);
-                      c.drawText(PLAYER_BTNS[i], bx, by + 9, tp);
+                      c.drawText(PLAYER_BTNS[i], bx, by + 7, tp);
                       if (i == 3 && shuffleOn) {
                           p.setColor(0xff76ff03);
-                          c.drawCircle(bx, by + 24, 3.5f, p);
+                          c.drawCircle(bx, by + 18, 3, p);
                       }
                   }
                   tp.setTextAlign(Paint.Align.CENTER);
-                  tp.setTextSize(15);
-                  tp.setColor(0xffffffff);
-                  if (playerRow == 0) c.drawText(PLAYER_BTN_NAMES[playerSel], bx0 + playerSel * gap, by + 52, tp);
-
-                  // Volume slider
-                  float sy = t + h - 34, sl = tx + 40, sr = l + w - 60;
-                  tp.setTextAlign(Paint.Align.LEFT);
-                  tp.setTextSize(20);
-                  tp.setColor(playerRow == 1 ? 0xffffffff : 0xff90a4ae);
-                  c.drawText(cdVolume <= 0 ? "🔇" : cdVolume < 0.5f ? "🔉" : "🔊", tx - 6, sy + 7, tp);
-                  p.setColor(0xff263142);
-                  rf.set(sl, sy - 4, sr, sy + 4);
-                  c.drawRoundRect(rf, 4, 4, p);
-                  p.setColor(playerRow == 1 ? 0xff2e7dbd : 0xff546e7a);
-                  rf.set(sl, sy - 4, sl + (sr - sl) * cdVolume, sy + 4);
-                  c.drawRoundRect(rf, 4, 4, p);
-                  p.setColor(0xffffffff);
-                  c.drawCircle(sl + (sr - sl) * cdVolume, sy, playerRow == 1 ? 11 : 8, p);
-                  tp.setTextAlign(Paint.Align.RIGHT);
                   tp.setTextSize(14);
-                  tp.setColor(0xff90a4ae);
-                  c.drawText(Math.round(cdVolume * 100) + "%", l + w - 18, sy + 5, tp);
-                  if (nowYT && playerRow == 1) {
-                      tp.setTextAlign(Paint.Align.CENTER);
-                      tp.setTextSize(13);
+                  tp.setColor(0xffffffff);
+                  if (playerRow == 0) c.drawText(PLAYER_BTN_NAMES[playerSel], bx0 + playerSel * gap + (playerSel > 0 ? 18 : 0), by + 44, tp);
+                  else {
                       tp.setColor(0xffffcc80);
-                      c.drawText("This slider is for your MP3 discs. YouTube discs follow the TV volume.", (sl + sr) / 2, sy - 14, tp);
+                      tp.setTextSize(13);
+                      c.drawText(nowYT ? "Volume is for MP3 discs. YouTube discs follow the TV volume." : "Up / Down to change the volume", l + w / 2 + 30, by + 44, tp);
                   }
                   tp.setTextAlign(Paint.Align.RIGHT);
-                  tp.setTextSize(13);
+                  tp.setTextSize(12);
                   tp.setColor(0xff90a4ae);
-                  c.drawText("Back to close", l + w - 24, t + 30, tp);
+                  c.drawText("Back to close", l + w - 22, t + 26, tp);
+              }
+
+              /** A shiny silver whistle, for the wheel. */
+              void drawWhistleIcon(Canvas c, float x, float y, float s) {
+                  c.save();
+                  c.translate(x, y);
+                  c.rotate(-12);
+                  c.scale(s, s);
+                  p.setColor(0xffb0b7bf);
+                  c.drawCircle(6, 4, 15, p);
+                  rf.set(-24, -9, 8, 3);
+                  c.drawRoundRect(rf, 4, 4, p);
+                  p.setColor(0xffe4e8ec);
+                  c.drawCircle(3, 0, 8, p);
+                  p.setColor(0xff37474f);
+                  rf.set(-2, -11, 10, -6);
+                  c.drawRoundRect(rf, 2, 2, p);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(2.5f);
+                  p.setColor(0xffe53935);
+                  c.drawCircle(18, -8, 5, p);
+                  p.setStyle(Paint.Style.FILL);
+                  c.restore();
               }
 
               /** A little silver 2000s stereo remote, for the wheel. */
@@ -5691,11 +5955,11 @@ jobs:
                   rf.set(-10, -23, 10, -4);
                   c.drawRoundRect(rf, 9, 9, p);
                   p.setColor(0xffe53935);
-                  c.drawCircle(5, -18, 2.6f, p);          // power
+                  c.drawCircle(5, -18, 2.6f, p);
                   p.setColor(0xff455a64);
                   for (int r2 = 0; r2 < 3; r2++) for (int k = -1; k <= 1; k++) c.drawCircle(k * 6, -6 + r2 * 7, 2.1f, p);
                   p.setColor(0xff1e88e5);
-                  c.drawCircle(0, 16, 3.2f, p);           // play
+                  c.drawCircle(0, 16, 3.2f, p);
                   p.setColor(0xff78909c);
                   c.drawCircle(-6, 16, 2f, p);
                   c.drawCircle(6, 16, 2f, p);
@@ -5757,6 +6021,7 @@ jobs:
                       tp.setColor(0xffffffff);
                       tp.setTextSize(i == wheelSel ? 46 : 38);
                       if (i == W_REMOTE) drawRemoteIcon(c, ix, iy - 6, i == wheelSel ? 1.15f : 1f);
+                      else if (i == W_WHISTLE) drawWhistleIcon(c, ix, iy - 6, i == wheelSel ? 1.15f : 1f);
                       else c.drawText(WHEEL_ICONS[i], ix, iy + 8, tp);
                       tp.setTextSize(14);
                       tp.setColor(i == wheelSel ? 0xffffffff : 0xffb0bec5);
@@ -5938,6 +6203,26 @@ jobs:
                   float[] out = new float[(int) (RATE * 0.25)];
                   addBell(out, 0, midi(79), 0.25f, 0.18f, false);
                   addBell(out, (int) (0.06f * RATE), midi(86), 0.25f, 0.18f, false);
+                  return out;
+              }
+
+              /** A two-note referee-style whistle, with a little trill. */
+              static float[] whistle() {
+                  int n = (int) (RATE * 0.62);
+                  float[] out = new float[n];
+                  double ph = 0;
+                  for (int i = 0; i < n; i++) {
+                      float t = i / (float) RATE;
+                      boolean second = t > 0.26f;
+                      float lt = second ? t - 0.3f : t;
+                      if (second && t < 0.3f) { continue; }
+                      double f = (second ? 2350 : 2050) + 60 * Math.sin(2 * Math.PI * 38 * t);
+                      ph += 2 * Math.PI * f / RATE;
+                      float len = second ? 0.32f : 0.26f;
+                      float env = Math.min(1, lt * 60) * Math.min(1, (len - lt) * 25);
+                      if (env < 0) env = 0;
+                      out[i] = (float) (Math.sin(ph) + 0.2 * Math.sin(2 * ph)) * env * 0.35f;
+                  }
                   return out;
               }
 
