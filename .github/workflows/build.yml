@@ -356,6 +356,8 @@ jobs:
                   AppPeng faceAt;                 // copying this penguin's emote: look at it
                   int napSide;                    // which side of the napper to lie down on
                   float stuckT, sx, sy;           // getting nowhere? pick somewhere else
+                  float progT, bestD = 1e9f;      // walking but not getting any closer? (circling)
+                  float joinWalkT;                // how long they've been trying to reach a conversation
                   AppPeng stareAt;            // the penguin they're glaring at after being hit
                   boolean hugWalk;
                   float rallyX, rallyY;
@@ -3095,6 +3097,18 @@ jobs:
                           a.x = CD_X + (a.x - CD_X) * k;
                           a.y = (CD_Y - 5) + (a.y - (CD_Y - 5)) * k;
                       }
+                      // Ezio's bed: solid too, whether he's in it or not; slide round it, and never aim for a spot in it
+                      {
+                          float bx = (a.x - BED_X) / 44f, by = (a.y - BED_Y) / 20f;
+                          float be = bx * bx + by * by;
+                          if (be < 1) {
+                              float k = (float) (1 / Math.sqrt(Math.max(be, 0.0001f)));
+                              a.x = BED_X + (a.x - BED_X) * k;
+                              a.y = BED_Y + (a.y - BED_Y) * k;
+                          }
+                          float tbx = (a.tx - BED_X) / 50f, tby = (a.ty - BED_Y) / 26f;
+                          if (tbx * tbx + tby * tby < 1) a.ty = a.ty < BED_Y ? BED_Y - 34 : BED_Y + 34;
+                      }
                       // lawn chairs: nobody walks through them; they slide round the edge instead
                       for (Chair ch : chairs) {
                           float hx = (a.x - ch.x) / 30f, hy = (a.y - (ch.y - 2)) / 15f;
@@ -3122,6 +3136,20 @@ jobs:
                           float se = sx2 * sx2 + sy2 * sy2;
                           if (se < 1) { float k = (float) (1 / Math.sqrt(Math.max(se, 0.0001f))); a.x = px + (a.x - px) * k; a.y = py + (a.y - py) * k; }
                       }
+                      // a penguin that isn't part of a conversation doesn't stand in the middle of it
+                      for (AppPeng q : list) {
+                          AppPeng qo = q.chatWith;
+                          if (qo == null || !q.chatTalking || q.x > qo.x || q == a || qo == a || together(a, q) || together(a, qo)) continue;
+                          float cx = (q.x + qo.x) / 2, cy = (q.y + qo.y) / 2;
+                          float ex = (a.x - cx) / 80f, ey = (a.y - cy) / 55f;
+                          float e = ex * ex + ey * ey;
+                          if (e < 1) {
+                              float k = (float) (1 / Math.sqrt(Math.max(e, 0.0001f)));
+                              float nx = cx + (a.x - cx) * k, ny = cy + (a.y - cy) * k;
+                              a.x += (nx - a.x) * Math.min(1, dt * 4);      // step out of the way rather than pop
+                              a.y += (ny - a.y) * Math.min(1, dt * 4);
+                          }
+                      }
                       // getting nowhere for a couple of seconds while trying to walk? pick somewhere else
                       if (a.moving) {
                           a.stuckT += dt;
@@ -3133,6 +3161,42 @@ jobs:
                               a.stuckT = 0; a.sx = a.x; a.sy = a.y;
                           }
                       } else { a.stuckT = 0; a.sx = a.x; a.sy = a.y; }
+                      // walking in circles, not getting any closer to where they're going? new plan
+                      if (a.moving && a.chatWith == null && a.ev == null && a.napWith == null) {
+                          float gd = (float) Math.sqrt(dist2(a.x, a.y, a.tx, a.ty));
+                          if (a.joinOf != null) gd = (float) Math.sqrt(dist2(a.x, a.y, (a.joinOf.x + (a.joinOf.chatWith != null ? a.joinOf.chatWith.x : a.joinOf.x)) / 2, a.joinOf.y));
+                          if (gd < a.bestD - 20) { a.bestD = gd; a.progT = 0; }
+                          else {
+                              a.progT += dt;
+                              if (a.progT > 3f) {
+                                  a.progT = 0; a.bestD = 1e9f;
+                                  if (a.joinOf != null) leaveGroup(a);
+                                  a.tx = a.x + (rnd.nextFloat() - 0.5f) * 180;
+                                  a.ty = a.y + (rnd.nextFloat() - 0.5f) * 110;
+                                  a.wait = 0;
+                              }
+                          }
+                      } else { a.progT = 0; a.bestD = 1e9f; }
+                  }
+                  // personal space: penguins that aren't together gently drift apart if they overlap (not during the whistle circle)
+                  for (int i = 0; i < list.size() && rallyT <= 0; i++) {
+                      AppPeng a = list.get(i);
+                      for (int j = i + 1; j < list.size(); j++) {
+                          AppPeng b = list.get(j);
+                          float dx = b.x - a.x, dy = (b.y - a.y) * 1.5f;
+                          float d2 = dx * dx + dy * dy;
+                          if (d2 >= 38 * 38 || together(a, b)) continue;
+                          float d = (float) Math.sqrt(Math.max(d2, 0.01f));
+                          if (d < 0.5f) { dx = rnd.nextFloat() - 0.5f; dy = 0.3f; d = 0.6f; }
+                          float push = (38 - d) * Math.min(1, dt * 3) * 0.5f;
+                          boolean aFixed = a.chatWith != null || a.joinOf != null || a.emote == E_NAP;
+                          boolean bFixed = b.chatWith != null || b.joinOf != null || b.emote == E_NAP;
+                          float ka = aFixed && !bFixed ? 0 : bFixed && !aFixed ? 2 : 1;
+                          float kb = bFixed && !aFixed ? 0 : aFixed && !bFixed ? 2 : 1;
+                          if (aFixed && bFixed) { ka = kb = 0.5f; }
+                          a.x -= dx / d * push * ka; a.y -= dy / d * push * ka / 1.5f;
+                          b.x += dx / d * push * kb; b.y += dy / d * push * kb / 1.5f;
+                      }
                   }
 
                   fightCool = Math.max(0, fightCool - dt);
@@ -3323,6 +3387,8 @@ jobs:
                       float jdx = tgx - a.x, jdy = tgy - a.y, jd = (float) Math.sqrt(jdx * jdx + jdy * jdy);
                       if (Math.abs(gx - a.x) <= 30) { jdx = gx - a.x; jdy = gy - a.y; jd = (float) Math.sqrt(jdx * jdx + jdy * jdy); }
                       if (jd > 3) {
+                          a.joinWalkT += dt;
+                          if (a.joinWalkT > 9 || blockedSpot(gx, gy, 10)) { leaveGroup(a); return; }    // can't get there: never mind
                           float st = Math.min(jd, 42 * dt);
                           a.x += jdx / jd * st; a.y += jdy / jd * st;
                           a.moving = true;
@@ -3755,6 +3821,32 @@ jobs:
                   return 1.6f + Math.min(len, 6) * 0.35f + rnd.nextFloat() * 1.2f;
               }
 
+              /** True if (x, y) is inside the igloo, the CD player, a lawn chair or Ezio's bed (pad = extra margin). */
+              boolean blockedSpot(float x, float y, float pad) {
+                  float ix = (x - IGLOO_X) / (150 + pad), iy = (y - (IGLOO_Y - 22)) / (46 + pad);
+                  if (ix * ix + iy * iy < 1) return true;
+                  float cx = (x - CD_X) / (52 + pad), cy = (y - (CD_Y - 5)) / (22 + pad);
+                  if (cx * cx + cy * cy < 1) return true;
+                  float bx = (x - BED_X) / (48 + pad), by = (y - BED_Y) / (22 + pad);
+                  if (bx * bx + by * by < 1) return true;
+                  for (Chair ch : chairs) {
+                      float hx = (x - ch.x) / (34 + pad), hy = (y - (ch.y - 2)) / (19 + pad);
+                      if (hx * hx + hy * hy < 1) return true;
+                  }
+                  return false;
+              }
+
+              /** True if a and b are together right now (chatting, joining, hugging, napping together...). */
+              boolean together(AppPeng a, AppPeng b) {
+                  if (a.chatWith == b || b.chatWith == a) return true;
+                  if (a.joinOf != null && (a.joinOf == b || a.joinOf.chatWith == b || a.joinOf == b.joinOf)) return true;
+                  if (b.joinOf != null && (b.joinOf == a || b.joinOf.chatWith == a)) return true;
+                  if (a.napHost == b || b.napHost == a || (a.napHost != null && a.napHost == b.napHost) || a.napWith == b || b.napWith == a) return true;
+                  if (a.ev != null && a.ev == b.ev) return true;
+                  if (a.emote == E_HUG || b.emote == E_HUG || a.hugWalk || b.hugWalk) return true;
+                  return false;
+              }
+
               /** Plays a sound from somewhere on the island: quieter the further from you, silent when far off. */
               void playAt(int snd, float vol, float rate, float x, float y) {
                   float d = (float) Math.sqrt(dist2(x, y, px, py));
@@ -3788,6 +3880,10 @@ jobs:
                           // join from whichever side they're coming from: above (slot 0) or below (slot 1)
                           int slot = a.y < (h.y + h.chatWith.y) / 2 ? 0 : 1;
                           if (slot == taken) slot = 1 - slot;
+                          float hmx = (h.x + h.chatWith.x) / 2, hmy = (h.y + h.chatWith.y) / 2;
+                          if (blockedSpot(hmx, hmy + (slot == 0 ? -34 : 30), 12)) slot = 1 - slot;
+                          if (slot == taken || blockedSpot(hmx, hmy + (slot == 0 ? -34 : 30), 12)) { a.joinOf = null; continue; }
+                          a.joinWalkT = 0;
                           a.joinSlot = slot;
                           a.faceMe = rnd.nextBoolean();
                           a.joinArrived = false;
@@ -3821,6 +3917,16 @@ jobs:
                           if (dd < 1) { ddx = 1; ddy = 0; dd = 1; }
                           mx = cx + ddx / dd * 170; my = cy + ddy / dd * 170;
                       }
+                  }
+                  // ...not where someone else is already standing...
+                  for (AppPeng q : list) {
+                      if (q == a || q == o) continue;
+                      float ddx = mx - q.x, ddy = my - q.y, dd = (float) Math.sqrt(ddx * ddx + ddy * ddy);
+                      if (dd < 70) { if (dd < 1) { ddx = 0; ddy = 1; dd = 1; } mx = q.x + ddx / dd * 70; my = q.y + ddy / dd * 70; }
+                  }
+                  // ...not on the bed, a chair or the CD player (or with a joiner's spot stuck inside one)...
+                  for (int tries = 0; tries < 6 && (blockedSpot(mx, my, 30) || (blockedSpot(mx, my - 34, 14) && blockedSpot(mx, my + 30, 14))); tries++) {
+                      my += my < CY ? -45 : 45;
                   }
                   // ...and not inside the igloo
                   float mix = (mx - IGLOO_X) / 190f, miy = (my - (IGLOO_Y - 22)) / 70f;
