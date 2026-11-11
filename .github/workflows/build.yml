@@ -330,6 +330,7 @@ jobs:
               int tvStarers;                                     // penguins currently staring out at you
               AppPeng ezTail; float ezTailT; boolean ezTailStare;   // Ezio tagging along behind (or just staring at) a penguin
               float ezStareGap = 0.2f;
+              boolean ezFollowGo, ezTailGo;    // following: only set off once he's dropped a little behind (no jittery shuffling)
               AppPeng ezPetGroup;     // the conversation Ezio is wandering over to
 
               static class AppPeng {
@@ -358,6 +359,7 @@ jobs:
                   float stuckT, sx, sy;           // getting nowhere? pick somewhere else
                   float progT, bestD = 1e9f;      // walking but not getting any closer? (circling)
                   float joinWalkT;                // how long they've been trying to reach a conversation
+                  float speedMul, walkMul = 1;    // their own natural walking pace, and a little variation walk to walk
                   AppPeng stareAt;            // the penguin they're glaring at after being hit
                   boolean hugWalk;
                   float rallyX, rallyY;
@@ -3136,20 +3138,6 @@ jobs:
                           float se = sx2 * sx2 + sy2 * sy2;
                           if (se < 1) { float k = (float) (1 / Math.sqrt(Math.max(se, 0.0001f))); a.x = px + (a.x - px) * k; a.y = py + (a.y - py) * k; }
                       }
-                      // a penguin that isn't part of a conversation doesn't stand in the middle of it
-                      for (AppPeng q : list) {
-                          AppPeng qo = q.chatWith;
-                          if (qo == null || !q.chatTalking || q.x > qo.x || q == a || qo == a || together(a, q) || together(a, qo)) continue;
-                          float cx = (q.x + qo.x) / 2, cy = (q.y + qo.y) / 2;
-                          float ex = (a.x - cx) / 80f, ey = (a.y - cy) / 55f;
-                          float e = ex * ex + ey * ey;
-                          if (e < 1) {
-                              float k = (float) (1 / Math.sqrt(Math.max(e, 0.0001f)));
-                              float nx = cx + (a.x - cx) * k, ny = cy + (a.y - cy) * k;
-                              a.x += (nx - a.x) * Math.min(1, dt * 4);      // step out of the way rather than pop
-                              a.y += (ny - a.y) * Math.min(1, dt * 4);
-                          }
-                      }
                       // getting nowhere for a couple of seconds while trying to walk? pick somewhere else
                       if (a.moving) {
                           a.stuckT += dt;
@@ -3188,14 +3176,16 @@ jobs:
                           if (d2 >= 38 * 38 || together(a, b)) continue;
                           float d = (float) Math.sqrt(Math.max(d2, 0.01f));
                           if (d < 0.5f) { dx = rnd.nextFloat() - 0.5f; dy = 0.3f; d = 0.6f; }
-                          float push = (38 - d) * Math.min(1, dt * 3) * 0.5f;
+                          float push = (38 - d) * Math.min(1, dt * 1.5f) * 0.5f;
                           boolean aFixed = a.chatWith != null || a.joinOf != null || a.emote == E_NAP;
                           boolean bFixed = b.chatWith != null || b.joinOf != null || b.emote == E_NAP;
                           float ka = aFixed && !bFixed ? 0 : bFixed && !aFixed ? 2 : 1;
                           float kb = bFixed && !aFixed ? 0 : aFixed && !bFixed ? 2 : 1;
                           if (aFixed && bFixed) { ka = kb = 0.5f; }
-                          a.x -= dx / d * push * ka; a.y -= dy / d * push * ka / 1.5f;
-                          b.x += dx / d * push * kb; b.y += dy / d * push * kb / 1.5f;
+                          float ax2 = a.x - dx / d * push * ka, ay2 = a.y - dy / d * push * ka / 1.5f;
+                          float bx2 = b.x + dx / d * push * kb, by2 = b.y + dy / d * push * kb / 1.5f;
+                          if (!blockedSpot(ax2, ay2, -6)) { a.x = ax2; a.y = ay2; }
+                          if (!blockedSpot(bx2, by2, -6)) { b.x = bx2; b.y = by2; }
                       }
                   }
 
@@ -3328,8 +3318,10 @@ jobs:
                           float tx = h.x + (a.napSide != 0 ? a.napSide * 46 : 0), ty = h.y + (a.napSide != 0 ? 4 : 38);
                           float dx = tx - a.x, dy = ty - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
                           if (d > 3) {
-                              float st = Math.min(d, 50 * dt);
-                              a.x += dx / d * st; a.y += dy / d * st;
+                              if (a.speedMul == 0) a.speedMul = 0.82f + rnd.nextFloat() * 0.36f;
+                              float st = Math.min(d, 50 * a.speedMul * dt);
+                              float[] dir = steer(a, dx, dy, st);
+                              a.x += dir[0] * st; a.y += dir[1] * st;
                               a.moving = true;
                               a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
                               return;
@@ -3389,8 +3381,10 @@ jobs:
                       if (jd > 3) {
                           a.joinWalkT += dt;
                           if (a.joinWalkT > 9 || blockedSpot(gx, gy, 10)) { leaveGroup(a); return; }    // can't get there: never mind
-                          float st = Math.min(jd, 42 * dt);
-                          a.x += jdx / jd * st; a.y += jdy / jd * st;
+                          if (a.speedMul == 0) a.speedMul = 0.82f + rnd.nextFloat() * 0.36f;
+                          float st = Math.min(jd, 42 * a.speedMul * dt);
+                          float[] dir = steer(a, jdx, jdy, st);
+                          a.x += dir[0] * st; a.y += dir[1] * st;
                           a.moving = true;
                           a.facing = Math.abs(jdx) > Math.abs(jdy) ? (jdx < 0 ? LEFT : RIGHT) : (jdy < 0 ? UP : DOWN);
                           return;
@@ -3539,30 +3533,19 @@ jobs:
                       }
                       a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 90;
                       a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
+                      a.walkMul = 0.9f + rnd.nextFloat() * 0.2f;
                   } else {
-                      float speed = d > 150 && a.chatWith == null ? 65f : 42f;
+                      if (a.speedMul == 0) a.speedMul = 0.82f + rnd.nextFloat() * 0.36f;
+                      float speed = (d > 150 && a.chatWith == null ? 65f : 42f) * a.speedMul * a.walkMul;
                       float stepLen = Math.min(d, speed * dt);
-                      a.x += dx / d * stepLen;
-                      a.y += dy / d * stepLen;
+                      float[] dir = a.chatWith == null ? steer(a, dx, dy, stepLen) : new float[]{dx / d, dy / d};
+                      a.x += dir[0] * stepLen;
+                      a.y += dir[1] * stepLen;
                       if (ezSleeping && ezScene == SCENE_ISLAND) {
                           // don't trample the sleeping cat
                           float ex2 = (a.x - ezX) / 48f, ey2 = (a.y - ezY) / 30f;
                           float e2 = ex2 * ex2 + ey2 * ey2;
                           if (e2 < 1) { float k = (float) (1 / Math.sqrt(Math.max(e2, 0.0001f))); a.x = ezX + (a.x - ezX) * k; a.y = ezY + (a.y - ezY) * k; }
-                      }
-                      if (a.chatWith == null) {
-                          // give chatting groups some room: walk round them, not through
-                          for (AppPeng q : list) {
-                              AppPeng qo = q.chatWith;
-                              if (qo == null || !q.chatTalking || q.x > qo.x) continue;
-                              float cx = (q.x + qo.x) / 2, cy = (q.y + qo.y) / 2;
-                              float ex = (a.x - cx) / 80f, ey = (a.y - cy) / 55f;
-                              float e = ex * ex + ey * ey;
-                              if (e < 1) {
-                                  float k = (float) (1 / Math.sqrt(Math.max(e, 0.0001f)));
-                                  a.x = cx + (a.x - cx) * k; a.y = cy + (a.y - cy) * k;
-                              }
-                          }
                       }
                       a.moving = true;
                       a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
@@ -3640,8 +3623,9 @@ jobs:
                           float dx = tx - a.x, dy = ty - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
                           if (ezScene != SCENE_ISLAND || ev.t > 12) { ev.phase = 2; return true; }
                           if (d > 3) {
-                              float st = Math.min(d, 60 * dt);
-                              a.x += dx / d * st; a.y += dy / d * st;
+                              float st = Math.min(d, 60 * (a.speedMul == 0 ? 1 : a.speedMul) * dt);
+                              float[] dir = steer(a, dx, dy, st);
+                              a.x += dir[0] * st; a.y += dir[1] * st;
                               a.moving = true;
                               a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
                               return true;
@@ -3667,8 +3651,9 @@ jobs:
                           // back to where they were standing
                           float dx = ev.spotX - a.x, dy = ev.spotY - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
                           if (d > 3) {
-                              float st = Math.min(d, 55 * dt);
-                              a.x += dx / d * st; a.y += dy / d * st;
+                              float st = Math.min(d, 55 * (a.speedMul == 0 ? 1 : a.speedMul) * dt);
+                              float[] dir = steer(a, dx, dy, st);
+                              a.x += dir[0] * st; a.y += dir[1] * st;
                               a.moving = true;
                               a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
                               return true;
@@ -3836,6 +3821,33 @@ jobs:
                   return false;
               }
 
+              /**
+               * Which way to actually step when heading in direction (dx, dy): straight on if it's clear, otherwise
+               * the nearest clear angle, trying the side the target is on first. Walks round things instead of into them.
+               */
+              float[] steer(AppPeng a, float dx, float dy, float step) {
+                  float d = (float) Math.sqrt(dx * dx + dy * dy);
+                  if (d < 0.001f) return new float[]{0, 0};
+                  float ux = dx / d, uy = dy / d;
+                  float look = Math.max(step, 14);
+                  float[] angs = {0, 35, -35, 70, -70, 105, -105, 140, -140};
+                  for (float ang : angs) {
+                      double r = Math.toRadians(ang);
+                      float vx = (float) (ux * Math.cos(r) - uy * Math.sin(r)), vy = (float) (ux * Math.sin(r) + uy * Math.cos(r));
+                      float nx = a.x + vx * look, ny = a.y + vy * look;
+                      if (blockedSpot(nx, ny, -4) && !blockedSpot(a.x, a.y, -4)) continue;
+                      boolean bump = false;
+                      for (AppPeng o : apps) {
+                          if (o == a || o.moving || together(a, o)) continue;
+                          float ox = nx - o.x, oy = (ny - o.y) * 1.5f;
+                          if (ox * ox + oy * oy < 30 * 30 && ox * ox + oy * oy < (a.x - o.x) * (a.x - o.x) + (a.y - o.y) * (a.y - o.y) * 2.25f) { bump = true; break; }
+                      }
+                      if (bump) continue;
+                      return new float[]{vx, vy};
+                  }
+                  return new float[]{ux, uy};
+              }
+
               /** True if a and b are together right now (chatting, joining, hugging, napping together...). */
               boolean together(AppPeng a, AppPeng b) {
                   if (a.chatWith == b || b.chatWith == a) return true;
@@ -3869,7 +3881,7 @@ jobs:
 
               void tryStartChat(AppPeng a, List<AppPeng> list) {
                   // Sometimes walk over and join a conversation that's already going (up to 4 penguins)
-                  if (rnd.nextFloat() < 0.2f) {
+                  if (rnd.nextFloat() < 0.25f) {
                       for (AppPeng h : list) {
                           if (h == a || h.chatWith == null || !h.chatTalking) continue;
                           if (dist2(h.x, h.y, a.x, a.y) > 480 * 480) continue;
@@ -4964,7 +4976,9 @@ jobs:
                       float back = a.facing == LEFT ? 48 : a.facing == RIGHT ? -48 : (ezX < a.x ? -40 : 40);
                       float tx = a.x + back, ty = a.y + (a.facing == UP ? 34 : a.facing == DOWN ? -20 : 6);
                       float dx = tx - ezX, dy = ty - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
-                      if (d > 6) ezStep(dx / d, dy / d, Math.min(d, (d > 120 ? 150 : 75) * dt), false);
+                      if (!ezTailGo && d > 40) ezTailGo = true;
+                      if (ezTailGo && d < 10) ezTailGo = false;
+                      if (ezTailGo) ezStep(dx / d, dy / d, Math.min(d, (d > 120 ? 150 : 95) * dt), false);
                       else ezFacing = a.x < ezX ? LEFT : RIGHT;
                       return;
                   }
@@ -5005,7 +5019,7 @@ jobs:
                               // found it! a pounce and a whippy tail; then either he leaves it, or carries it back to you
                               splat(ezX + (ezFacing == LEFT ? -12 : 12), ezY - 6);
                               ezFound = false;
-                              ezWhipT = 1.8f;
+                              ezWhipT = rnd.nextFloat() < 0.33f ? 1.8f : 0;
                               ezCarryBall = rnd.nextBoolean();
                               ezFetchWait = 0.45f;
                           }
@@ -5048,8 +5062,10 @@ jobs:
                       float behind = facing == LEFT ? 55 : facing == RIGHT ? -55 : (ezX < px ? -45 : 45);
                       float tx = px + behind, ty = py + (facing == UP ? 40 : 8);
                       float dx = tx - ezX, dy = ty - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
-                      if (d > 28) {
-                          float sp = d > 300 ? 340 : d > 120 ? 250 : 170;
+                      if (!ezFollowGo && d > 46) ezFollowGo = true;
+                      if (ezFollowGo && d < 12) ezFollowGo = false;
+                      if (ezFollowGo) {
+                          float sp = d > 300 ? 340 : d > 120 ? 250 : 150;
                           ezStep(dx / d, dy / d, Math.min(d, sp * dt), inside);
                       } else if (rnd.nextFloat() < dt * 0.3f) {
                           ezFacing = px < ezX ? LEFT : RIGHT;
@@ -5083,7 +5099,7 @@ jobs:
                       // caught the snowball! hearts, and that tail goes everywhere
                       ezRun = false;
                       ezHappyT = 1.2f;
-                      ezWhipT = 1.8f;
+                      ezWhipT = rnd.nextFloat() < 0.33f ? 1.8f : 0;
                       ezWait = 2 + rnd.nextFloat() * 2;
                       splat(ezX + (ezFacing == LEFT ? -12 : 12), ezY - 6);
                       return;
@@ -5282,7 +5298,7 @@ jobs:
                       float ie = ix * ix + iy * iy;
                       if (ie < 1) { float k = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f))); nx = IGLOO_X + (nx - IGLOO_X) * k; ny = (IGLOO_Y - 22) + (ny - (IGLOO_Y - 22)) * k; }
                   }
-                  if (Math.abs(ux) > 0.2f) ezFacing = ux < 0 ? LEFT : RIGHT;
+                  if (Math.abs(ux) > 0.45f) ezFacing = ux < 0 ? LEFT : RIGHT;
                   ezX = nx; ezY = ny;
                   ezMoving = true;
                   if (len > 0.4f && Math.hypot(nx - ox, ny - oy) < len * 0.3f) ezBlocked = true;
