@@ -272,7 +272,7 @@ jobs:
 
               // Emotes / poses
               static final int E_NONE = 0, E_WAVE = 1, E_DANCE = 2, E_THROW = 3, E_SLIDE = 4, E_NAP = 5,
-                      E_HOP = 6, E_FLAP = 7, E_LOOK = 8, E_SIT = 9, E_FLINCH = 10, E_HUG = 11, E_PAT = 12;
+                      E_HOP = 6, E_FLAP = 7, E_LOOK = 8, E_SIT = 9, E_FLINCH = 10, E_HUG = 11, E_PAT = 12, E_SCRATCH = 13;
 
               static final int SCENE_ISLAND = 0, SCENE_IGLOO = 1, SCENE_FIRE = 2;
               static final int OV_NONE = 0, OV_WHEEL = 1, OV_LIST = 2, OV_FOLDER = 3, OV_PLAYER = 4;
@@ -326,6 +326,10 @@ jobs:
                   boolean three;
               }
               PetEvent petEv;
+              final float[] emoteStartAt = new float[16];      // when each emote was last started by someone on their own
+              int tvStarers;                                     // penguins currently staring out at you
+              AppPeng ezTail; float ezTailT; boolean ezTailStare;   // Ezio tagging along behind (or just staring at) a penguin
+              float ezStareGap = 0.2f;
               AppPeng ezPetGroup;     // the conversation Ezio is wandering over to
 
               static class AppPeng {
@@ -346,6 +350,12 @@ jobs:
                   int shortWalks, longAfter;      // after a few little shuffles about, they set off somewhere further
                   PetEvent ev;                    // part of a "someone left the chat to pet Ezio" moment
                   float evPauseT;
+                  float flutterT;                 // shaking off a stare with a flutter of blinks
+                  AppPeng napWith;                // walking over to nap beside this penguin
+                  AppPeng napHost;                // napping as part of this penguin's group nap
+                  AppPeng faceAt;                 // copying this penguin's emote: look at it
+                  int napSide;                    // which side of the napper to lie down on
+                  float stuckT, sx, sy;           // getting nowhere? pick somewhere else
                   AppPeng stareAt;            // the penguin they're glaring at after being hit
                   boolean hugWalk;
                   float rallyX, rallyY;
@@ -2914,12 +2924,15 @@ jobs:
                           for (AppPeng a : list) { a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 80; a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 50; a.wait = 0; }
                       }
                   }
+                  int starers = 0;
+                  for (AppPeng a : list) if (a.noticeT > 0 || (!a.moving && a.facing == DOWN && a.emote == E_NONE && a.chatWith == null && a.joinOf == null)) starers++;
+                  tvStarers = starers;
                   for (AppPeng a : list) {
                       if (rallyT > 0) {
                           // rush to their spot in the circle, then stand still facing you
                           a.blinkT = Math.max(0, a.blinkT - dt);
                           a.nextBlink -= dt;
-                          if (a.nextBlink <= 0) { a.blinkT = 0.13f; a.nextBlink = 2 + rnd.nextFloat() * 5; }
+                          if (a.nextBlink <= 0) { a.blinkT = 0.13f; a.nextBlink = 1.4f + rnd.nextFloat() * 3.6f; }
                           float dx = a.rallyX - a.x, dy = a.rallyY - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
                           if (d > 3) {
                               float stp = Math.min(d, 210 * dt);
@@ -2961,7 +2974,7 @@ jobs:
                       }
                       a.hitT = Math.max(0, a.hitT - dt);
                       a.nextBlink -= dt;
-                      if (a.nextBlink <= 0) { a.blinkT = 0.13f; a.nextBlink = 2 + rnd.nextFloat() * 5; }
+                      if (a.nextBlink <= 0) { a.blinkT = 0.13f; a.nextBlink = 1.4f + rnd.nextFloat() * 3.6f; }
                       a.blinkT = Math.max(0, a.blinkT - dt);
 
                       if (a.throwBackT > 0) {
@@ -3022,7 +3035,7 @@ jobs:
                       if (a.emote != E_NONE) {
                           if (a.emoteDelay > 0) {
                               a.emoteDelay -= dt;
-                              if (a.emote == E_WAVE || a.emote == E_DANCE) a.facing = faceToward(a.x, a.y, px, py);
+                              if (a.emote == E_WAVE || a.emote == E_DANCE) a.facing = a.faceAt != null ? faceToward(a.x, a.y, a.faceAt.x, a.faceAt.y) : faceToward(a.x, a.y, px, py);
                           } else {
                               a.emoteT += dt;
                               if (a.emote == E_DANCE) {
@@ -3034,7 +3047,25 @@ jobs:
                                   a.y += (a.hugY - a.y) * k2;
                                   if (a.facing == RIGHT && rnd.nextFloat() < dt * 2.5f) spawnHeart(a.x + 20, a.y - 80);
                               }
-                              if (a.emoteT >= a.emoteDur) a.emote = E_NONE;
+                              if (a.emoteT >= a.emoteDur) {
+                                  if (a.emote == E_NAP && rnd.nextFloat() < 0.25f) {
+                                      // stirs... and drifts back off
+                                      a.emoteT = 0; a.emoteDur = 4 + rnd.nextFloat() * 6;
+                                  } else {
+                                      if (a.emote == E_NAP) {
+                                          // sometimes a neighbour wakes up with them (together, or just after)
+                                          AppPeng grp = a.napHost != null ? a.napHost : a;
+                                          if (rnd.nextFloat() < 0.3f) for (AppPeng o : list) {
+                                              if (o == a || o.emote != E_NAP || (o != grp && o.napHost != grp)) continue;
+                                              o.emoteDur = Math.min(o.emoteDur, o.emoteT + 0.2f + rnd.nextFloat() * 2.5f);
+                                              break;
+                                          }
+                                          a.napHost = null;
+                                      }
+                                      a.emote = E_NONE;
+                                      a.faceAt = null;
+                                  }
+                              }
                           }
                           a.moving = false;
                           a.phase += dt * 3;
@@ -3064,6 +3095,44 @@ jobs:
                           a.x = CD_X + (a.x - CD_X) * k;
                           a.y = (CD_Y - 5) + (a.y - (CD_Y - 5)) * k;
                       }
+                      // lawn chairs: nobody walks through them; they slide round the edge instead
+                      for (Chair ch : chairs) {
+                          float hx = (a.x - ch.x) / 30f, hy = (a.y - (ch.y - 2)) / 15f;
+                          float he = hx * hx + hy * hy;
+                          if (he < 1) {
+                              float k = (float) (1 / Math.sqrt(Math.max(he, 0.0001f)));
+                              a.x = ch.x + (a.x - ch.x) * k;
+                              a.y = (ch.y - 2) + (a.y - (ch.y - 2)) * k;
+                          }
+                          // and nobody aims for a spot inside one
+                          float tx2 = (a.tx - ch.x) / 34f, ty2 = (a.ty - (ch.y - 2)) / 19f;
+                          if (tx2 * tx2 + ty2 * ty2 < 1) a.ty = ch.y + 26;
+                      }
+                      // give sleepers some room (penguins and you)
+                      if (a.emote != E_NAP && a.napWith == null && a.napHost == null) {
+                          for (AppPeng o : list) {
+                              if (o == a || o.emote != E_NAP) continue;
+                              float sx2 = (a.x - o.x) / 46f, sy2 = (a.y - o.y) / 26f;
+                              float se = sx2 * sx2 + sy2 * sy2;
+                              if (se < 1) { float k = (float) (1 / Math.sqrt(Math.max(se, 0.0001f))); a.x = o.x + (a.x - o.x) * k; a.y = o.y + (a.y - o.y) * k; }
+                          }
+                      }
+                      if (pEmote == E_NAP) {
+                          float sx2 = (a.x - px) / 60f, sy2 = (a.y - py) / 34f;
+                          float se = sx2 * sx2 + sy2 * sy2;
+                          if (se < 1) { float k = (float) (1 / Math.sqrt(Math.max(se, 0.0001f))); a.x = px + (a.x - px) * k; a.y = py + (a.y - py) * k; }
+                      }
+                      // getting nowhere for a couple of seconds while trying to walk? pick somewhere else
+                      if (a.moving) {
+                          a.stuckT += dt;
+                          if (a.stuckT > 2f) {
+                              if (dist2(a.x, a.y, a.sx, a.sy) < 12 * 12 && a.chatWith == null && a.joinOf == null && a.ev == null) {
+                                  a.tx = a.x + (rnd.nextFloat() - 0.5f) * 160;
+                                  a.ty = a.y + (rnd.nextFloat() - 0.5f) * 100;
+                              }
+                              a.stuckT = 0; a.sx = a.x; a.sy = a.y;
+                          }
+                      } else { a.stuckT = 0; a.sx = a.x; a.sy = a.y; }
                   }
 
                   fightCool = Math.max(0, fightCool - dt);
@@ -3174,6 +3243,40 @@ jobs:
 
               void npcThink(AppPeng a, float dt, List<AppPeng> list) {
                   if (a.ev != null && petEvent(a, dt)) return;
+                  if (a == ezStarePeng && ezStareT > 0) {
+                      // in a slow-blink stare-off with Ezio: not going anywhere until it's done
+                      a.moving = false;
+                      a.facing = faceToward(a.x, a.y, ezX, ezY);
+                      return;
+                  }
+                  if (a.flutterT > 0) {
+                      // shaking off a stare: a quick flutter of blinks
+                      a.flutterT -= dt;
+                      a.moving = false;
+                      if (((int) (a.flutterT / 0.09f)) % 2 == 0) a.blinkT = 0.05f;
+                      return;
+                  }
+                  if (a.napWith != null) {
+                      // going over to nap beside someone
+                      AppPeng h = a.napWith;
+                      if (h.emote != E_NAP) { a.napWith = null; }
+                      else {
+                          float tx = h.x + (a.napSide != 0 ? a.napSide * 46 : 0), ty = h.y + (a.napSide != 0 ? 4 : 38);
+                          float dx = tx - a.x, dy = ty - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
+                          if (d > 3) {
+                              float st = Math.min(d, 50 * dt);
+                              a.x += dx / d * st; a.y += dy / d * st;
+                              a.moving = true;
+                              a.facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? LEFT : RIGHT) : (dy < 0 ? UP : DOWN);
+                              return;
+                          }
+                          a.napWith = null;
+                          a.napHost = h;
+                          a.facing = DOWN;
+                          npcEmote(a, E_NAP, 7 + rnd.nextFloat() * 12, 0);
+                          return;
+                      }
+                  }
                   if (a.stareT > 0 && a.stareAt != null) {
                       a.stareT -= dt;
                       a.moving = false;
@@ -3184,6 +3287,7 @@ jobs:
                           a.facing = f == LEFT ? RIGHT : f == RIGHT ? LEFT : f == UP ? DOWN : UP;
                           a.turnAwayT = 1.2f + rnd.nextFloat() * 1f;
                           a.stareAt = null;
+                          if (rnd.nextFloat() < 0.3f) a.flutterT = 0.55f;
                       }
                       return;
                   }
@@ -3192,10 +3296,14 @@ jobs:
                   a.ignoreT = Math.max(0, a.ignoreT - dt);
                   boolean playerClose = pdx * pdx + pdy * pdy < 130 * 130;
                   if (!playerClose) a.noticeT = 0;
+                  if (playerClose && a.ignoreT <= 0 && a.noticeT <= 0 && tvStarers >= 2) a.ignoreT = 6;     // enough are staring already
                   if (playerClose && a.ignoreT <= 0) {
                       // they turn to look at you for a few seconds... then lose interest and get on with things
                       a.noticeT += dt;
-                      if (a.noticeT > 4 + ((a.label == null ? 0 : a.label.length()) % 4)) { a.noticeT = 0; a.ignoreT = 25; a.wait = 0; }
+                      if (a.noticeT > 4 + ((a.label == null ? 0 : a.label.length()) % 4)) {
+                          a.noticeT = 0; a.ignoreT = 25; a.wait = 0;
+                          if (rnd.nextFloat() < 0.3f) a.flutterT = 0.55f;
+                      }
                       else {
                           if (a.chatWith != null) endChat(a);
                           if (a.joinOf != null) leaveGroup(a);
@@ -3303,7 +3411,10 @@ jobs:
                       a.moving = false;
                       float roll = rnd.nextFloat();
                       // (everything about 12% less often than before; chats about half as often)
-                      if (roll < dt * 0.035f) npcEmote(a, rnd.nextBoolean() ? E_HOP : E_FLAP, 0.7f, 0);
+                      if (roll < dt * 0.035f) {
+                          int e = rnd.nextBoolean() ? E_HOP : E_FLAP;
+                          if (time - emoteStartAt[e] > 1.2f) { emoteStartAt[e] = time; npcEmote(a, e, 0.7f, 0); }
+                      }
                       else if (roll < dt * 0.062f) soloEmote(a);
                       else if (roll < dt * (a.hangout ? 0.09f : 0.11f)) tryStartChat(a, list);
                       if (a.wait <= 0) a.hangout = false;
@@ -3312,7 +3423,7 @@ jobs:
                       if (a.lookT <= 0 && a.emote == E_NONE) {
                           a.lookT = 1.5f + rnd.nextFloat() * 2.5f;
                           float lr = rnd.nextFloat();
-                          a.facing = lr < 0.35f ? LEFT : lr < 0.7f ? RIGHT : lr < 0.85f ? UP : DOWN;
+                          a.facing = lr < 0.35f ? LEFT : lr < 0.7f ? RIGHT : lr < 0.85f || tvStarers >= 2 ? UP : DOWN;
                       }
                       return;
                   }
@@ -3344,14 +3455,14 @@ jobs:
                       a.hangout = rnd.nextFloat() < 0.35f;
                       a.wait = a.hangout ? 6 + rnd.nextFloat() * 8 : 1.5f + rnd.nextFloat() * 3.5f;
                       a.lookT = 0.8f + rnd.nextFloat() * 1.5f;
-                      if (a.longAfter <= 0) a.longAfter = 3 + rnd.nextInt(3);
+                      if (a.longAfter <= 0) a.longAfter = 4 + rnd.nextInt(3);
                       a.shortWalks++;
                       if (a.shortWalks >= a.longAfter) {
                           // a proper walk: pick somewhere a good way off and make that the new home spot
-                          a.shortWalks = 0; a.longAfter = 3 + rnd.nextInt(3);
+                          a.shortWalks = 0; a.longAfter = 4 + rnd.nextInt(3);
                           for (int tries = 0; tries < 8; tries++) {
                               double ang = rnd.nextDouble() * Math.PI * 2;
-                              float dist = 200 + rnd.nextFloat() * 250;
+                              float dist = 180 + rnd.nextFloat() * 225;
                               float nx = a.x + (float) Math.cos(ang) * dist, ny = a.y + (float) Math.sin(ang) * dist * 0.7f;
                               float ex = (nx - CX) / (RX - 90), ey = (ny - CY) / (RY - 80);
                               float ix = (nx - IGLOO_X) / 190f, iy = (ny - (IGLOO_Y - 22)) / 80f;
@@ -3585,18 +3696,57 @@ jobs:
               /** A penguin doing its own thing for 7-15 seconds: waving, dancing, throwing snowballs or having a nap. */
               void soloEmote(AppPeng a) {
                   float dur = 7 + rnd.nextFloat() * 8;
-                  switch (rnd.nextInt(4)) {
-                      case 0: npcEmote(a, E_WAVE, dur, 0); break;
-                      case 1: npcEmote(a, E_DANCE, dur, 0); break;
+                  // don't emote right on top of someone who's asleep
+                  if (pEmote == E_NAP && dist2(a.x, a.y, px, py) < 160 * 160) return;
+                  int pick = rnd.nextInt(5);
+                  int[] kinds = {E_WAVE, E_DANCE, -1, E_NAP, E_SCRATCH};
+                  // nobody starts the same thing at the same moment as a penguin they're not with (no copy-paste crowds)
+                  for (int tries = 0; tries < 5 && kinds[pick] > 0 && time - emoteStartAt[kinds[pick]] < 1.5f; tries++) pick = (pick + 1) % 5;
+                  if (kinds[pick] > 0 && time - emoteStartAt[kinds[pick]] < 1.5f) return;
+                  if (kinds[pick] > 0) emoteStartAt[kinds[pick]] = time;
+                  if (pick == 4) { npcEmote(a, E_SCRATCH, 1 + rnd.nextFloat() * 3, 0); a.wait = Math.max(a.wait, 1.5f); return; }
+                  if (pick == 3) { startNap(a, dur); a.wait = Math.max(a.wait, 1.5f); return; }
+                  switch (pick) {
+                      case 0: npcEmote(a, E_WAVE, dur, 0); echoEmote(a, E_WAVE); break;
+                      case 1: npcEmote(a, E_DANCE, dur, 0); echoEmote(a, E_DANCE); break;
                       case 2: {
                           float r = rnd.nextFloat();
                           a.spreeLeft = r < 0.55f ? 1 : r < 0.8f ? 2 : r < 0.93f ? 3 : 4;
                           a.spreeT = 30; a.spreeNext = 0.2f;
                           break;
                       }
-                      default: a.facing = DOWN; npcEmote(a, E_NAP, dur, 0); break;
+                      default: break;
                   }
                   a.wait = Math.max(a.wait, 1.5f);
+              }
+
+              /** Now and then one or two penguins close by join in (or wave back) a moment later. Never ones mid-conversation. */
+              void echoEmote(AppPeng a, int e) {
+                  if (rnd.nextFloat() > 0.18f) return;
+                  int n = 0, max = 1 + (rnd.nextFloat() < 0.3f ? 1 : 0);
+                  for (AppPeng o : apps) {
+                      if (o == a || o.chatWith != null || o.joinOf != null || o.emote != E_NONE || o.ev != null || o.hugWalk || o.spreeT > 0) continue;
+                      if (dist2(o.x, o.y, a.x, a.y) > 82 * 82) continue;
+                      o.faceAt = a;
+                      npcEmote(o, e, Math.max(2, a.emoteDur - 1 - rnd.nextFloat() * 2), 0.4f + rnd.nextFloat() * 0.9f);
+                      if (++n >= max) break;
+                  }
+              }
+
+              /** A nap; sometimes one or two others wander over and nap alongside. */
+              void startNap(AppPeng a, float dur) {
+                  a.facing = DOWN;
+                  a.napHost = null;
+                  npcEmote(a, E_NAP, dur + 3, 0);
+                  if (rnd.nextFloat() > 0.3f) return;
+                  int n = 0, max = 1 + rnd.nextInt(2);
+                  for (AppPeng o : apps) {
+                      if (o == a || o.chatWith != null || o.joinOf != null || o.emote != E_NONE || o.ev != null || o.hugWalk || o.spreeT > 0 || o.napWith != null) continue;
+                      if (dist2(o.x, o.y, a.x, a.y) > 380 * 380) continue;
+                      o.napWith = a;
+                      o.napSide = n == 0 ? (rnd.nextBoolean() ? -1 : 1) : 0;
+                      if (++n >= max) break;
+                  }
               }
 
               /** How long a speech bubble stays up: longer lines get more time. */
@@ -3641,6 +3791,9 @@ jobs:
                           a.joinSlot = slot;
                           a.faceMe = rnd.nextBoolean();
                           a.joinArrived = false;
+                          float walk = (float) Math.sqrt(dist2(h.x, h.y, a.x, a.y)) / 42f + 4;
+                          h.chatDur = Math.max(h.chatDur, h.chatT + walk + 4);
+                          h.chatWith.chatDur = Math.max(h.chatWith.chatDur, h.chatWith.chatT + walk + 4);
                           a.joinSpeakT = 1 + rnd.nextFloat() * 2;
                           a.wait = 0;
                           return;
@@ -3649,7 +3802,7 @@ jobs:
                   // Pick a random free penguin from a wide area, so different penguins get to meet
                   ArrayList<AppPeng> pool = new ArrayList<>();
                   for (AppPeng o : list) {
-                      if (o == a || o.chatWith != null || o.joinOf != null || o.emote != E_NONE || o.hugWalk) continue;
+                      if (o == a || o.chatWith != null || o.joinOf != null || o.emote != E_NONE || o.hugWalk || o == ezStarePeng || o.ev != null || o.napWith != null) continue;
                       if (dist2(o.x, o.y, px, py) < 160 * 160) continue;
                       if (dist2(o.x, o.y, a.x, a.y) < 480 * 480) pool.add(o);
                   }
@@ -4618,7 +4771,7 @@ jobs:
                           float t0 = 1.0f + k * 2.6f;                       // the opening blink of this round
                           float tEz = ezStareEzFirst ? t0 : t0 + 1.1f;      // Ezio's turn
                           float tPg = ezStareEzFirst ? t0 + 1.1f : t0;      // the penguin's turn
-                          float e1 = tEz, e2 = tEz + 0.22f;                 // first eye, then the other
+                          float e1 = tEz, e2 = tEz + ezStareGap;            // first eye, then the other
                           boolean firstOpen = !(t > e1 && t < e1 + 0.6f), secondOpen = !(t > e2 && t < e2 + 0.6f);
                           if (ezStareLFirst) { ezEyeLClosed |= !firstOpen; ezEyeRClosed |= !secondOpen; }
                           else { ezEyeRClosed |= !firstOpen; ezEyeLClosed |= !secondOpen; }
@@ -4690,6 +4843,23 @@ jobs:
                           ezFacing = lookX < ezX ? LEFT : RIGHT;
                       }
                       ezMoving = false;
+                      return;
+                  }
+                  if (!ezFollow && ezTail != null) {
+                      ezTailT -= dt;
+                      AppPeng a = ezTail;
+                      if (ezTailT <= 0 || a.chatWith != null || a.joinOf != null || !apps.contains(a)) { ezTail = null; ezWait = 1 + rnd.nextFloat(); return; }
+                      if (ezTailStare) {
+                          // "what are you looking at?" "what are YOU looking at?"
+                          ezFacing = a.x < ezX ? LEFT : RIGHT;
+                          return;
+                      }
+                      // trot along behind it
+                      float back = a.facing == LEFT ? 48 : a.facing == RIGHT ? -48 : (ezX < a.x ? -40 : 40);
+                      float tx = a.x + back, ty = a.y + (a.facing == UP ? 34 : a.facing == DOWN ? -20 : 6);
+                      float dx = tx - ezX, dy = ty - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
+                      if (d > 6) ezStep(dx / d, dy / d, Math.min(d, (d > 120 ? 150 : 75) * dt), false);
+                      else ezFacing = a.x < ezX ? LEFT : RIGHT;
                       return;
                   }
                   if (!ezFollow && ezChatA != null && ezChatT > 0) {
@@ -4854,6 +5024,7 @@ jobs:
                           ezStareSets = 1 + rnd.nextInt(2);
                           ezStareEzFirst = rnd.nextFloat() < 0.65f;
                           ezStareLFirst = rnd.nextBoolean();
+                          ezStareGap = 0.1f + rnd.nextFloat() * 0.12f;
                           ezStareLen = 1.0f + ezStareSets * 2.6f + 0.6f;
                           ezWait = ezStareLen;
                           a.wait = ezStareLen + 0.4f;
@@ -4912,6 +5083,21 @@ jobs:
                       return;
                   }
                   ezWait = 2 + rnd.nextFloat() * 4;
+                  if (!inside && rnd.nextFloat() < 0.14f) {
+                      // tag along behind a penguin that's out for a walk (or just sit and stare at it)
+                      AppPeng pick = null;
+                      for (AppPeng a : apps) {
+                          if (!a.moving || a.chatWith != null || a.joinOf != null || a.ev != null) continue;
+                          if (dist2(a.x, a.y, ezX, ezY) > 420 * 420) continue;
+                          if (pick == null || rnd.nextBoolean()) pick = a;
+                      }
+                      if (pick != null) {
+                          ezTail = pick;
+                          ezTailStare = rnd.nextFloat() < 0.25f;
+                          ezTailT = ezTailStare ? 3 + rnd.nextFloat() * 4 : 5 + rnd.nextFloat() * 15;
+                          return;
+                      }
+                  }
                   if (!inside && petEv == null && rnd.nextFloat() < 0.12f) {
                       // wander up beside a conversation: one of them might come over to say hello
                       for (AppPeng a : apps) {
@@ -5096,14 +5282,14 @@ jobs:
                       if (ezEyeLClosed) c.drawLine(hx - 7, hy, hx - 1, hy, p);
                       if (ezEyeRClosed) c.drawLine(hx + 2, hy, hx + 8, hy, p);
                       p.setStyle(Paint.Style.FILL);
-                      // open eyes go a bit cross-eyed, staring up at the penguin
+                      // open eyes drift a little outward (a derpy, wall-eyed look up at the penguin)
                       if (!ezEyeLClosed) {
                           p.setColor(0xffffffff); c.drawCircle(hx - 4, hy, 4.4f, p);
-                          p.setColor(0xff111111); c.drawCircle(hx - 2.2f, hy - 1.2f, 1.9f, p);
+                          p.setColor(0xff111111); c.drawCircle(hx - 5.4f, hy - 1.0f, 1.9f, p);
                       }
                       if (!ezEyeRClosed) {
                           p.setColor(0xffffffff); c.drawCircle(hx + 5, hy, 4.4f, p);
-                          p.setColor(0xff111111); c.drawCircle(hx + 3.4f, hy - 1.4f, 1.9f, p);
+                          p.setColor(0xff111111); c.drawCircle(hx + 6.4f, hy - 1.0f, 1.9f, p);
                       }
                   } else if (blink) {
                       p.setStyle(Paint.Style.STROKE);
@@ -6175,6 +6361,10 @@ jobs:
                       leftA = 18 + f; rightA = -18 - f;
                   } else if (emote == E_WAVE) {
                       rightA = -150 + (float) Math.sin(et * 16) * 28;
+                  } else if (emote == E_SCRATCH) {
+                      // flipper up to the side of the head, rubbing a little
+                      float rub = (float) Math.sin(et * 14) * 8;
+                      if (face == LEFT) rightA = -150 + rub; else if (face == RIGHT) leftA = 150 - rub; else rightA = -150 + rub;
                   } else if (emote == E_PAT) {
                       // front flipper reaches out and pats down three times
                       float lift = 0.5f + 0.5f * (float) Math.cos(et / 1.6f * 3 * 2 * Math.PI);
