@@ -313,9 +313,9 @@ jobs:
               static final String[] CHAT_BITS = {"…", "♪", "♥", "?", "!", "★", "☺", "❄", "ha ha", "!!", "hm?", "♫", "ooh", "…!"};
               static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
 
-              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "📯", "🙈", "⚙️", "🎵"};
-              static final int WN = 11, W_MUSIC = 10, W_REMOTE = 5, W_EZIO = 6, W_WHISTLE = 7;
-              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Slide", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music"};
+              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "📯", "🙈", "⚙️", "🎵", "🤔", "👀"};
+              static final int WN = 13, W_MUSIC = 10, W_REMOTE = 5, W_EZIO = 6, W_WHISTLE = 7;
+              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Slide", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music", "Head scratch", "Look around"};
 
               /** One penguin leaves a conversation to go and pet Ezio; the rest pause and react. */
               static class PetEvent {
@@ -360,6 +360,7 @@ jobs:
                   float progT, bestD = 1e9f;      // walking but not getting any closer? (circling)
                   float joinWalkT;                // how long they've been trying to reach a conversation
                   float speedMul, walkMul = 1;    // their own natural walking pace, and a little variation walk to walk
+                  boolean hasWp; float wpX, wpY;  // a stop-off point to get round something in the way
                   AppPeng stareAt;            // the penguin they're glaring at after being hit
                   boolean hugWalk;
                   float rallyX, rallyY;
@@ -627,6 +628,7 @@ jobs:
                   holder.setFixedSize(VW, VH);
                   holder.addCallback(this);
                   view.setFocusable(true);
+                  try { view.setPointerIcon(android.view.PointerIcon.getSystemIcon(this, android.view.PointerIcon.TYPE_NULL)); } catch (Throwable ignored) { }
                   setContentView(view);
                   view.requestFocus();
 
@@ -743,6 +745,21 @@ jobs:
 
               @Override
               public boolean dispatchGenericMotionEvent(MotionEvent e) {
+                  int src = e.getSource();
+                  boolean pad = (src & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD || (src & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
+                  if (pad && scene == SCENE_ISLAND && overlay == OV_NONE
+                          && (e.getActionMasked() == MotionEvent.ACTION_HOVER_MOVE || e.getActionMasked() == MotionEvent.ACTION_MOVE)) {
+                      // swiping the controller's touchpad looks around the island
+                      long now = SystemClock.elapsedRealtime();
+                      float x = e.getX(), y = e.getY();
+                      if (tpLastT > 0 && now - tpLastT < 250) {
+                          if (!freeCam) { fcX = px; fcY = py - 40; freeCam = true; }
+                          fcX += (x - tpLastX) * 1.2f; fcY += (y - tpLastY) * 1.2f;
+                          clampFreeCam();
+                      }
+                      tpLastX = x; tpLastY = y; tpLastT = now;
+                      return true;
+                  }
                   if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
                           && e.getAction() == MotionEvent.ACTION_MOVE) {
                       float x = e.getAxisValue(MotionEvent.AXIS_X);
@@ -2750,7 +2767,12 @@ jobs:
                   }
 
                   moving = false;
-                  if (!frozen) {
+                  if (freeCam && (scene != SCENE_ISLAND || overlay != OV_NONE)) freeCam = false;
+                  if (freeCam) {
+                      float cdx = (kRight ? 1 : 0) - (kLeft ? 1 : 0) + axX, cdy = (kDown ? 1 : 0) - (kUp ? 1 : 0) + axY;
+                      fcX += cdx * 700 * dt; fcY += cdy * 700 * dt;
+                      clampFreeCam();
+                  } else if (!frozen) {
                       if (pEmote == E_SLIDE) {
                           movePlayer(slideDX, slideDY, 520, dt, true);
                           moving = true;
@@ -3082,14 +3104,14 @@ jobs:
 
                   // Nobody walks through the igloo or the boombox: anyone inside the base gets nudged back out
                   for (AppPeng a : list) {
-                      float ix = (a.x - IGLOO_X) / 140f, iy = (a.y - (IGLOO_Y - 22)) / 40f;
+                      float ix = (a.x - IGLOO_X) / 160f, iy = (a.y - (IGLOO_Y - 22)) / 46f;
                       float ie = ix * ix + iy * iy;
                       if (ie < 1) {
                           float k = (float) (1 / Math.sqrt(Math.max(ie, 0.0001f)));
                           a.x = IGLOO_X + (a.x - IGLOO_X) * k;
                           a.y = (IGLOO_Y - 22) + (a.y - (IGLOO_Y - 22)) * k;
                           // and if they were headed through it, send them around instead
-                          float tix = (a.tx - IGLOO_X) / 150f, tiy = (a.ty - (IGLOO_Y - 22)) / 46f;
+                          float tix = (a.tx - IGLOO_X) / 170f, tiy = (a.ty - (IGLOO_Y - 22)) / 54f;
                           if (tix * tix + tiy * tiy < 1) a.ty = a.y < IGLOO_Y - 22 ? IGLOO_Y - 80 : IGLOO_Y + 40;
                       }
                       float cx2 = (a.x - CD_X) / 48f, cy2 = (a.y - (CD_Y - 5)) / 18f;
@@ -3143,8 +3165,8 @@ jobs:
                           a.stuckT += dt;
                           if (a.stuckT > 2f) {
                               if (dist2(a.x, a.y, a.sx, a.sy) < 12 * 12 && a.chatWith == null && a.joinOf == null && a.ev == null) {
-                                  a.tx = a.x + (rnd.nextFloat() - 0.5f) * 160;
-                                  a.ty = a.y + (rnd.nextFloat() - 0.5f) * 100;
+                                  freshTarget(a, 300);
+                                  a.hx = a.tx; a.hy = a.ty;
                               }
                               a.stuckT = 0; a.sx = a.x; a.sy = a.y;
                           }
@@ -3156,11 +3178,12 @@ jobs:
                           if (gd < a.bestD - 20) { a.bestD = gd; a.progT = 0; }
                           else {
                               a.progT += dt;
-                              if (a.progT > 3f) {
+                              if (a.progT > 1.4f) {
+                                  // getting nowhere: forget that destination and pick a different, clear one
                                   a.progT = 0; a.bestD = 1e9f;
                                   if (a.joinOf != null) leaveGroup(a);
-                                  a.tx = a.x + (rnd.nextFloat() - 0.5f) * 180;
-                                  a.ty = a.y + (rnd.nextFloat() - 0.5f) * 110;
+                                  freshTarget(a, 300);
+                                  a.hx = a.tx; a.hy = a.ty;
                                   a.wait = 0;
                               }
                           }
@@ -3534,13 +3557,28 @@ jobs:
                       a.tx = a.hx + (rnd.nextFloat() - 0.5f) * 90;
                       a.ty = a.hy + (rnd.nextFloat() - 0.5f) * 60;
                       a.walkMul = 0.9f + rnd.nextFloat() * 0.2f;
+                      a.hasWp = false;
+                      if (blockedSpot(a.tx, a.ty, 16)) freshTarget(a, 220);
                   } else {
                       if (a.speedMul == 0) a.speedMul = 0.82f + rnd.nextFloat() * 0.36f;
                       float speed = (d > 150 && a.chatWith == null ? 65f : 42f) * a.speedMul * a.walkMul;
-                      float stepLen = Math.min(d, speed * dt);
-                      float[] dir = a.chatWith == null ? steer(a, dx, dy, stepLen) : new float[]{dx / d, dy / d};
+                      // plan round anything solid between here and there: head for a stop-off point beside it first
+                      if (!a.hasWp && !pathClear(a.x, a.y, a.tx, a.ty)) {
+                          float[] w = detour(a.x, a.y, a.tx, a.ty);
+                          if (w != null) { a.hasWp = true; a.wpX = w[0]; a.wpY = w[1]; }
+                          else if (a.chatWith == null) { freshTarget(a, 260); }
+                      }
+                      float gx = a.tx, gy = a.ty;
+                      if (a.hasWp) {
+                          gx = a.wpX; gy = a.wpY;
+                          if (dist2(a.x, a.y, gx, gy) < 10 * 10) { a.hasWp = false; gx = a.tx; gy = a.ty; }
+                      }
+                      float gdx = gx - a.x, gdy = gy - a.y, gd = (float) Math.max(0.001, Math.sqrt(gdx * gdx + gdy * gdy));
+                      float stepLen = Math.min(gd, speed * dt);
+                      float[] dir = a.chatWith == null ? steer(a, gdx, gdy, stepLen) : new float[]{gdx / gd, gdy / gd};
                       a.x += dir[0] * stepLen;
                       a.y += dir[1] * stepLen;
+                      dx = gdx; dy = gdy;
                       if (ezSleeping && ezScene == SCENE_ISLAND) {
                           // don't trample the sleeping cat
                           float ex2 = (a.x - ezX) / 48f, ey2 = (a.y - ezY) / 30f;
@@ -3648,8 +3686,11 @@ jobs:
                           return false;
                       }
                       if (ev.phase == 2) {
-                          // back to where they were standing
+                          // back to where they were standing (or near it, if someone's standing there now)
                           float dx = ev.spotX - a.x, dy = ev.spotY - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
+                          boolean taken = false;
+                          for (AppPeng q : apps) if (q != a && q.ev != ev && dist2(q.x, q.y, ev.spotX, ev.spotY) < 50 * 50) { taken = true; break; }
+                          if (taken && d < 75) d = 0;
                           if (d > 3) {
                               float st = Math.min(d, 55 * (a.speedMul == 0 ? 1 : a.speedMul) * dt);
                               float[] dir = steer(a, dx, dy, st);
@@ -3790,12 +3831,14 @@ jobs:
                   a.napHost = null;
                   npcEmote(a, E_NAP, dur + 3, 0);
                   if (rnd.nextFloat() > 0.3f) return;
-                  int n = 0, max = 1 + rnd.nextInt(2);
+                  int n = 0, max = 1 + rnd.nextInt(2), firstSide = 1;
                   for (AppPeng o : apps) {
                       if (o == a || o.chatWith != null || o.joinOf != null || o.emote != E_NONE || o.ev != null || o.hugWalk || o.spreeT > 0 || o.napWith != null) continue;
                       if (dist2(o.x, o.y, a.x, a.y) > 380 * 380) continue;
                       o.napWith = a;
-                      o.napSide = n == 0 ? (rnd.nextBoolean() ? -1 : 1) : 0;
+                      if (n == 0) o.napSide = rnd.nextBoolean() ? -1 : 1;
+                      else o.napSide = -firstSide;
+                      if (n == 0) firstSide = o.napSide;
                       if (++n >= max) break;
                   }
               }
@@ -3808,7 +3851,7 @@ jobs:
 
               /** True if (x, y) is inside the igloo, the CD player, a lawn chair or Ezio's bed (pad = extra margin). */
               boolean blockedSpot(float x, float y, float pad) {
-                  float ix = (x - IGLOO_X) / (150 + pad), iy = (y - (IGLOO_Y - 22)) / (46 + pad);
+                  float ix = (x - IGLOO_X) / (165 + pad), iy = (y - (IGLOO_Y - 22)) / (50 + pad);
                   if (ix * ix + iy * iy < 1) return true;
                   float cx = (x - CD_X) / (52 + pad), cy = (y - (CD_Y - 5)) / (22 + pad);
                   if (cx * cx + cy * cy < 1) return true;
@@ -3846,6 +3889,50 @@ jobs:
                       return new float[]{vx, vy};
                   }
                   return new float[]{ux, uy};
+              }
+
+              /** True if walking straight from (x0,y0) to (x1,y1) doesn't pass through anything solid. */
+              boolean pathClear(float x0, float y0, float x1, float y1) {
+                  float d = (float) Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+                  int n = Math.max(2, (int) (d / 12));
+                  for (int i = 1; i <= n; i++) {
+                      float t = i / (float) n;
+                      if (blockedSpot(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 6)) return false;
+                  }
+                  return true;
+              }
+
+              /** A stop-off point beside whatever's in the way, on the side nearer the destination. Null if none found. */
+              float[] detour(float x0, float y0, float x1, float y1) {
+                  float d = (float) Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+                  if (d < 1) return null;
+                  int n = Math.max(2, (int) (d / 12));
+                  float bx = x1, by = y1;
+                  for (int i = 1; i <= n; i++) {
+                      float t = i / (float) n;
+                      float sx = x0 + (x1 - x0) * t, sy = y0 + (y1 - y0) * t;
+                      if (blockedSpot(sx, sy, 6)) { bx = sx; by = sy; break; }
+                  }
+                  float ux = (x1 - x0) / d, uy = (y1 - y0) / d, nx = -uy, ny = ux;
+                  for (float off = 50; off <= 300; off += 25) {
+                      for (int side = 0; side < 2; side++) {
+                          float sg = side == 0 ? 1 : -1;
+                          float wx = bx + nx * off * sg, wy = by + ny * off * sg * 0.7f;
+                          if (blockedSpot(wx, wy, 14)) continue;
+                          if (!pathClear(x0, y0, wx, wy)) continue;
+                          return new float[]{wx, wy};
+                      }
+                  }
+                  return null;
+              }
+
+              /** A random spot nearby that's clear of anything solid. */
+              void freshTarget(AppPeng a, float range) {
+                  for (int tries = 0; tries < 12; tries++) {
+                      float tx = a.x + (rnd.nextFloat() - 0.5f) * range, ty = a.y + (rnd.nextFloat() - 0.5f) * range * 0.6f;
+                      float ex = (tx - CX) / (RX - 90), ey = (ty - CY) / (RY - 80);
+                      if (ex * ex + ey * ey < 1 && !blockedSpot(tx, ty, 20)) { a.tx = tx; a.ty = ty; a.hasWp = false; return; }
+                  }
               }
 
               /** True if a and b are together right now (chatting, joining, hugging, napping together...). */
@@ -4481,6 +4568,7 @@ jobs:
                           || code == KeyEvent.KEYCODE_BUTTON_START;
                   idleT = 0;
                   afkT = 0;
+                  if (freeCam && (ok || back || menu) && !repeat) { freeCam = false; play(S_TICK, 0.3f, 1f); return; }
                   if (pEmote == E_NAP || pEmote == E_SIT || pEmote == E_LOOK) {
                       if (overlay == OV_NONE) pEmote = E_NONE;
                   }
@@ -4640,7 +4728,27 @@ jobs:
                       case 8: openAppsList(null); break;
                       case 9: openSettings(); break;
                       case 10: setMusic(!musicOn); break;
+                      case 11: startEmote(E_SCRATCH, 1.5f + rnd.nextFloat() * 2.5f); break;
+                      case 12: startFreeCam(); break;
                   }
+              }
+
+              // free camera: look around the island without moving your penguin
+              volatile boolean freeCam;
+              volatile float fcX, fcY;
+              float tpLastX, tpLastY;
+              long tpLastT;
+
+              void startFreeCam() {
+                  if (scene != SCENE_ISLAND) { toast("Look around works out on the island"); return; }
+                  if (!freeCam) { fcX = px; fcY = py - 40; }
+                  freeCam = true;
+                  toast("Looking around: move to pan · OK or Back to return");
+              }
+
+              void clampFreeCam() {
+                  fcX = Math.max(VW / 2f, Math.min(WW - VW / 2f, fcX));
+                  fcY = Math.max(VH / 2f, Math.min(WH - VH / 2f, fcY));
               }
 
               /** Two penguins step in and hug. */
@@ -4963,6 +5071,7 @@ jobs:
                       ezMoving = false;
                       return;
                   }
+                  if (!ezFollow && ezTail != null && (ezHappyT > 0 || ezPatPeng != null)) ezTail = null;    // one thing at a time
                   if (!ezFollow && ezTail != null) {
                       ezTailT -= dt;
                       AppPeng a = ezTail;
@@ -4978,7 +5087,7 @@ jobs:
                       float dx = tx - ezX, dy = ty - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
                       if (!ezTailGo && d > 40) ezTailGo = true;
                       if (ezTailGo && d < 10) ezTailGo = false;
-                      if (ezTailGo) ezStep(dx / d, dy / d, Math.min(d, (d > 120 ? 150 : 95) * dt), false);
+                      if (ezTailGo) ezStep(dx / d, dy / d, Math.min(d, 95 * dt), false);
                       else ezFacing = a.x < ezX ? LEFT : RIGHT;
                       return;
                   }
@@ -5205,12 +5314,13 @@ jobs:
                       return;
                   }
                   ezWait = 2 + rnd.nextFloat() * 4;
-                  if (!inside && rnd.nextFloat() < 0.14f) {
-                      // tag along behind a penguin that's out for a walk (or just sit and stare at it)
+                  if (ezHappyT > 0 || ezPatPeng != null || ezStareT > 0 || ezRun) { ezWait = 0.6f; return; }   // still busy
+                  if (!inside && rnd.nextFloat() < 0.25f) {
+                      // tag along behind a penguin that happens to be walking past (or just sit and stare at it)
                       AppPeng pick = null;
                       for (AppPeng a : apps) {
                           if (!a.moving || a.chatWith != null || a.joinOf != null || a.ev != null) continue;
-                          if (dist2(a.x, a.y, ezX, ezY) > 420 * 420) continue;
+                          if (dist2(a.x, a.y, ezX, ezY) > 170 * 170) continue;
                           if (pick == null || rnd.nextBoolean()) pick = a;
                       }
                       if (pick != null) {
@@ -5220,24 +5330,24 @@ jobs:
                           return;
                       }
                   }
-                  if (!inside && petEv == null && rnd.nextFloat() < 0.12f) {
+                  if (!inside && petEv == null && rnd.nextFloat() < 0.2f) {
                       // wander up beside a conversation: one of them might come over to say hello
                       for (AppPeng a : apps) {
                           AppPeng o = a.chatWith;
                           if (o == null || !a.chatTalking || a.x > o.x || a.ev != null) continue;
-                          if (dist2(a.x, a.y, ezX, ezY) > 500 * 500) continue;
+                          if (dist2(a.x, a.y, ezX, ezY) > 200 * 200) continue;
                           float side = ezX < (a.x + o.x) / 2 ? -1 : 1;
                           ezPetGroup = a;
                           ezTX = (a.x + o.x) / 2 + side * 115; ezTY = (a.y + o.y) / 2 + 12;
                           return;
                       }
                   }
-                  if (!inside && rnd.nextFloat() < 0.2f) {
-                      // nosy: trot over to two penguins chatting and sit in front of them
+                  if (!inside && rnd.nextFloat() < 0.3f) {
+                      // nosy: trot over to two penguins chatting nearby and sit in front of them
                       for (AppPeng a : apps) {
                           AppPeng o = a.chatWith;
                           if (o == null || !a.chatTalking || a.x > o.x) continue;
-                          if (dist2(a.x, a.y, ezX, ezY) > 450 * 450) continue;
+                          if (dist2(a.x, a.y, ezX, ezY) > 200 * 200) continue;
                           boolean joined = false;
                           for (AppPeng q : apps) if (q.joinOf == a || q.joinOf == o) joined = true;
                           if (joined) continue;
@@ -5246,9 +5356,9 @@ jobs:
                           return;
                       }
                   }
-                  if (!inside && rnd.nextFloat() < 0.4f) {
+                  if (!inside && rnd.nextFloat() < 0.6f) {
                       AppPeng best = null;
-                      float bd = 380 * 380;
+                      float bd = 170 * 170;
                       for (AppPeng a : apps) {
                           if (a.emote != E_NONE || a.chatWith != null || a.hugWalk) continue;
                           float dd = dist2(a.x, a.y, ezX, ezY);
@@ -6056,8 +6166,9 @@ jobs:
               void drawIsland(Canvas c, List<AppPeng> list) {
                   // While napping, the view drifts slowly so nothing sits still on the screen
                   float driftX = (float) Math.sin(time * 0.07f) * 70 * afkDim, driftY = (float) Math.cos(time * 0.05f) * 35 * afkDim;
-                  int camX = (int) Math.max(0, Math.min(WW - VW, px - VW / 2f + driftX));
-                  int camY = (int) Math.max(0, Math.min(WH - VH, py - VH / 2f - 40 + driftY));
+                  float ccx = freeCam ? fcX : px, ccy = freeCam ? fcY + 40 : py;
+                  int camX = (int) Math.max(0, Math.min(WW - VW, ccx - VW / 2f + driftX));
+                  int camY = (int) Math.max(0, Math.min(WH - VH, ccy - VH / 2f - 40 + driftY));
                   // Falling snow stays put in the world: when the view moves, the flakes slide the other way
                   if (lastCamX >= 0) {
                       float cdx = camX - lastCamX, cdy = camY - lastCamY;
