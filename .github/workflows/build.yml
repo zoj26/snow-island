@@ -313,9 +313,9 @@ jobs:
               static final String[] CHAT_BITS = {"…", "♪", "♥", "?", "!", "★", "☺", "❄", "ha ha", "!!", "hm?", "♫", "ooh", "…!"};
               static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
 
-              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "📯", "🙈", "⚙️", "🎵", "🤔", "👀"};
-              static final int WN = 13, W_MUSIC = 10, W_REMOTE = 5, W_EZIO = 6, W_WHISTLE = 7;
-              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Slide", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music", "Head scratch", "Look around"};
+              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "📯", "🙈", "⚙️", "🎵", "👀"};
+              static final int WN = 12, W_MUSIC = 10, W_REMOTE = 5, W_EZIO = 6, W_WHISTLE = 7;
+              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Slide", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music", "Look around"};
 
               /** One penguin leaves a conversation to go and pet Ezio; the rest pause and react. */
               static class PetEvent {
@@ -366,6 +366,7 @@ jobs:
                   float rallyX, rallyY;
                   AppPeng joinOf;      // joined someone else's conversation
                   int joinSlot;
+                  float glideX, glideY, glideT;   // a short sideways shuffle while emoting
                   float joinSpeakT;
                   float blinkT, nextBlink = 2f;
                   boolean placed;
@@ -435,6 +436,8 @@ jobs:
               // Settings
               SharedPreferences prefs;
               boolean musicOn, soundOn, weatherFx;
+              static final int[] SFX_LEVELS = {100, 80, 60, 40, 20, 0};
+              int sfxLevel = 1;                    // sound effects volume (index into SFX_LEVELS); 80% to start
               int seasonPref;
               boolean namesAlways, autoReturn, tagColour;
               int clockSize;
@@ -609,6 +612,7 @@ jobs:
                   prefs = getSharedPreferences("island", MODE_PRIVATE);
                   musicOn = prefs.getBoolean("music", true);
                   soundOn = prefs.getBoolean("sound", true);
+                  sfxLevel = Math.max(0, Math.min(SFX_LEVELS.length - 1, prefs.getInt("sfxvol", 1)));
                   weatherFx = prefs.getBoolean("weatherfx", true);
                   seasonPref = prefs.getInt("season", 0);
                   bellyIcons = prefs.getBoolean("belly", false);
@@ -754,6 +758,7 @@ jobs:
                       float x = e.getX(), y = e.getY();
                       if (tpLastT > 0 && now - tpLastT < 250) {
                           if (!freeCam) { fcX = px; fcY = py - 40; freeCam = true; }
+                          fcIdle = 0;
                           fcX += (x - tpLastX) * 1.2f; fcY += (y - tpLastY) * 1.2f;
                           clampFreeCam();
                       }
@@ -843,6 +848,9 @@ jobs:
 
               void play(int id, float vol, float rate) {
                   if (!soundOn || sounds == null || soundIds[id] == 0) return;
+                  if (id == S_TICK || id == S_OPEN) vol *= 0.8f;      // menu dings: a touch softer
+                  vol *= SFX_LEVELS[sfxLevel] / 100f;
+                  if (vol <= 0) return;
                   try { sounds.play(soundIds[id], vol, vol, 1, 0, rate); } catch (Exception ignored) { }
               }
 
@@ -2675,6 +2683,7 @@ jobs:
                           if (drY[i] > VH + 50) { drY[i] = -50; drX[i] = rnd.nextFloat() * VW; }
                           if (drX[i] < -60) drX[i] += VW + 120;
                           if (drX[i] > VW + 60) drX[i] -= VW + 120;
+                          if (drY[i] < -60) drY[i] += VH + 110;
                       }
                   }
 
@@ -2772,6 +2781,9 @@ jobs:
                       float cdx = (kRight ? 1 : 0) - (kLeft ? 1 : 0) + axX, cdy = (kDown ? 1 : 0) - (kUp ? 1 : 0) + axY;
                       fcX += cdx * 700 * dt; fcY += cdy * 700 * dt;
                       clampFreeCam();
+                      // left alone for a while? the view drifts back to you
+                      if (Math.abs(cdx) > 0.15f || Math.abs(cdy) > 0.15f) fcIdle = 0;
+                      else { fcIdle += dt; if (fcIdle > 9) { freeCam = false; fcIdle = 0; } }
                   } else if (!frozen) {
                       if (pEmote == E_SLIDE) {
                           movePlayer(slideDX, slideDY, 520, dt, true);
@@ -3093,6 +3105,12 @@ jobs:
                                   }
                               }
                           }
+                          if (a.glideT > 0) {
+                              a.glideT -= dt;
+                              float k3 = Math.min(1, dt * 7);
+                              a.x += (a.glideX - a.x) * k3;
+                              a.y += (a.glideY - a.y) * k3;
+                          }
                           a.moving = false;
                           a.phase += dt * 3;
                           continue;
@@ -3123,7 +3141,7 @@ jobs:
                       }
                       // Ezio's bed: solid too, whether he's in it or not; slide round it, and never aim for a spot in it
                       {
-                          float bx = (a.x - BED_X) / 44f, by = (a.y - BED_Y) / 20f;
+                          float bx = (a.x - BED_X) / 50f, by = (a.y - BED_Y) / 22f;
                           float be = bx * bx + by * by;
                           if (be < 1) {
                               float k = (float) (1 / Math.sqrt(Math.max(be, 0.0001f)));
@@ -3395,10 +3413,10 @@ jobs:
                       AppPeng h = a.joinOf, h2 = h.chatWith;
                       if (h2 == null || !list.contains(h)) { leaveGroup(a); return; }
                       float mx = (h.x + h2.x) / 2, my = (h.y + h2.y) / 2;
-                      float gx = mx, gy = my + (a.joinSlot == 0 ? -34 : 30);
+                      float gx = mx, gy = my + (a.joinSlot == 0 ? -50 : 46);
                       // go round the pair rather than through them: line up above/below first, then step in
                       float tgx = gx, tgy = gy;
-                      if (Math.abs(gx - a.x) > 30) tgy = gy + (a.joinSlot == 0 ? -40 : 40);
+                      if (Math.abs(gx - a.x) > 30) tgy = gy + (a.joinSlot == 0 ? -36 : 36);
                       float jdx = tgx - a.x, jdy = tgy - a.y, jd = (float) Math.sqrt(jdx * jdx + jdy * jdy);
                       if (Math.abs(gx - a.x) <= 30) { jdx = gx - a.x; jdy = gy - a.y; jd = (float) Math.sqrt(jdx * jdx + jdy * jdy); }
                       if (jd > 3) {
@@ -3658,6 +3676,11 @@ jobs:
                           // over to Ezio
                           float side = a.x < ezX ? -1 : 1;
                           float tx = ezX + side * 46, ty = ezY - 3;
+                          // a side that's clear (not on his bed, a chair...), or failing that, just in front of him
+                          if (blockedSpot(tx, ty, 4)) {
+                              if (!blockedSpot(ezX - side * 46, ty, 4)) { side = -side; tx = ezX + side * 46; }
+                              else { tx = ezX + side * 40; ty = ezY + 30; }
+                          }
                           float dx = tx - a.x, dy = ty - a.y, d = (float) Math.sqrt(dx * dx + dy * dy);
                           if (ezScene != SCENE_ISLAND || ev.t > 12) { ev.phase = 2; return true; }
                           if (d > 3) {
@@ -3790,13 +3813,12 @@ jobs:
                   float dur = 7 + rnd.nextFloat() * 8;
                   // don't emote right on top of someone who's asleep
                   if (pEmote == E_NAP && dist2(a.x, a.y, px, py) < 160 * 160) return;
-                  int pick = rnd.nextInt(5);
-                  int[] kinds = {E_WAVE, E_DANCE, -1, E_NAP, E_SCRATCH};
+                  int pick = rnd.nextInt(4);
+                  int[] kinds = {E_WAVE, E_DANCE, -1, E_NAP};
                   // nobody starts the same thing at the same moment as a penguin they're not with (no copy-paste crowds)
-                  for (int tries = 0; tries < 5 && kinds[pick] > 0 && time - emoteStartAt[kinds[pick]] < 1.5f; tries++) pick = (pick + 1) % 5;
+                  for (int tries = 0; tries < 4 && kinds[pick] > 0 && time - emoteStartAt[kinds[pick]] < 1.5f; tries++) pick = (pick + 1) % 4;
                   if (kinds[pick] > 0 && time - emoteStartAt[kinds[pick]] < 1.5f) return;
                   if (kinds[pick] > 0) emoteStartAt[kinds[pick]] = time;
-                  if (pick == 4) { npcEmote(a, E_SCRATCH, 1 + rnd.nextFloat() * 3, 0); a.wait = Math.max(a.wait, 1.5f); return; }
                   if (pick == 3) { startNap(a, dur); a.wait = Math.max(a.wait, 1.5f); return; }
                   switch (pick) {
                       case 0: npcEmote(a, E_WAVE, dur, 0); echoEmote(a, E_WAVE); break;
@@ -3980,8 +4002,8 @@ jobs:
                           int slot = a.y < (h.y + h.chatWith.y) / 2 ? 0 : 1;
                           if (slot == taken) slot = 1 - slot;
                           float hmx = (h.x + h.chatWith.x) / 2, hmy = (h.y + h.chatWith.y) / 2;
-                          if (blockedSpot(hmx, hmy + (slot == 0 ? -34 : 30), 12)) slot = 1 - slot;
-                          if (slot == taken || blockedSpot(hmx, hmy + (slot == 0 ? -34 : 30), 12)) { a.joinOf = null; continue; }
+                          if (blockedSpot(hmx, hmy + (slot == 0 ? -50 : 46), 12)) slot = 1 - slot;
+                          if (slot == taken || blockedSpot(hmx, hmy + (slot == 0 ? -50 : 46), 12)) { a.joinOf = null; continue; }
                           a.joinWalkT = 0;
                           a.joinSlot = slot;
                           a.faceMe = rnd.nextBoolean();
@@ -4217,8 +4239,20 @@ jobs:
                   fxHopT = 0;
                   fxFacing = LEFT;
                   fxPlan.clear();
-                  fxState = ezFollow || rnd.nextBoolean() ? 0 : 1;
-                  fxT = 6 + rnd.nextFloat() * 8;
+                  startBedStay();
+              }
+
+              /**
+               * Lies curled up in bed for 30-60 s, one of three ways: asleep the whole time; awake a while, then asleep
+               * (at least 15 s); or awake the whole time, then up. (Never sits, and never a quick eye-close then up.)
+               */
+              void startBedStay() {
+                  float total = 30 + rnd.nextFloat() * 30;
+                  float r = rnd.nextFloat();
+                  fxThenSleep = 0;
+                  if (r < 0.4f) { fxState = 1; fxT = total; }
+                  else if (r < 0.75f) { fxState = 0; fxT = 8 + rnd.nextFloat() * 12; fxThenSleep = Math.max(15, total - fxT); }
+                  else { fxState = 0; fxT = total; }
               }
 
               boolean fxOnHearth() { return fxY < (FX_HEARTH_Y + FX_FLOOR_Y) / 2; }
@@ -4244,15 +4278,9 @@ jobs:
               void fxPlanNext() {
                   float r = rnd.nextFloat();
                   boolean inBed = Math.abs(fxX - FX_BED) < 8 && fxOnHearth();
-                  if (inBed && r < 0.55f) {
-                      // already in bed and fancies staying: sitting there he may curl up; asleep he sleeps on
-                      fxState = fxState == 1 || rnd.nextFloat() < 0.6f ? 1 : 0;
-                      fxT = fxState == 1 ? 30 + rnd.nextFloat() * 30 : 10 + rnd.nextFloat() * 10;
-                      return;
-                  }
+                  if (inBed) r = 0.55f + r * 0.45f;      // just had his time in bed: up and about now
                   if (r < 0.55f) {
                       // bed: sit and stare, or curl up and sleep
-                      fxNext = rnd.nextFloat() < 0.5f ? 0 : 1;
                       fxStop(FX_BED, 0, WALK, -1);
                   } else if (r < 0.65f) {
                       // the Maine Coon sprawl: flops over on his side on the floor, in line with the left of the fireplace
@@ -4295,6 +4323,8 @@ jobs:
               }
 
               boolean fxPresent;
+              boolean ezCurlAwake;                // draw the curled-up loaf with his eyes open
+              float fxThenSleep;                   // in bed awake: once this stretch is up, drifts off for this long
 
               void updateFireEzio(float dt) {
                   if (ezScene != SCENE_IGLOO) { fxPresent = false; return; }
@@ -4347,13 +4377,13 @@ jobs:
                       if (wp[3] == -2) {
                           // flop over on one side or the other for a good long lounge
                           fxState = 4; fxFacing = rnd.nextBoolean() ? LEFT : RIGHT;
-                          fxT = 15 + rnd.nextFloat() * 20;
+                          fxT = 30 + rnd.nextFloat() * 30;
                           fxPlan.clear();
                           return;
                       }
                       if (Math.abs(fxX - FX_BED) < 4 && wantHearth && wp[3] < 0) {
-                          fxState = fxNext; fxFacing = LEFT;
-                          fxT = fxState == 1 ? 30 + rnd.nextFloat() * 30 : 10 + rnd.nextFloat() * 10;    // naps last a good while
+                          fxFacing = LEFT;
+                          startBedStay();
                           fxPlan.clear();
                           return;
                       }
@@ -4362,6 +4392,11 @@ jobs:
                       return;
                   }
                   if (fxT > 0) return;
+                  if (fxState == 0 && fxThenSleep > 0) {
+                      // lying there awake a while... then drifts off
+                      fxState = 1; fxT = fxThenSleep; fxThenSleep = 0;
+                      return;
+                  }
                   int before = fxState;
                   if (fxPlan.isEmpty()) fxPlanNext();
                   if (fxPlan.isEmpty() && fxT > 0 && (fxState == 0 || fxState == 1)) return;     // stayed in bed
@@ -4568,7 +4603,7 @@ jobs:
                           || code == KeyEvent.KEYCODE_BUTTON_START;
                   idleT = 0;
                   afkT = 0;
-                  if (freeCam && (ok || back || menu) && !repeat) { freeCam = false; play(S_TICK, 0.3f, 1f); return; }
+                  if (freeCam && (ok || back || menu) && !repeat) { freeCam = false; fcIdle = 0; play(S_TICK, 0.3f, 1f); if (!menu) return; }
                   if (pEmote == E_NAP || pEmote == E_SIT || pEmote == E_LOOK) {
                       if (overlay == OV_NONE) pEmote = E_NONE;
                   }
@@ -4728,21 +4763,20 @@ jobs:
                       case 8: openAppsList(null); break;
                       case 9: openSettings(); break;
                       case 10: setMusic(!musicOn); break;
-                      case 11: startEmote(E_SCRATCH, 1.5f + rnd.nextFloat() * 2.5f); break;
-                      case 12: startFreeCam(); break;
+                      case 11: startFreeCam(); break;
                   }
               }
 
               // free camera: look around the island without moving your penguin
               volatile boolean freeCam;
-              volatile float fcX, fcY;
+              volatile float fcX, fcY, fcIdle;
               float tpLastX, tpLastY;
               long tpLastT;
 
               void startFreeCam() {
                   if (scene != SCENE_ISLAND) { toast("Look around works out on the island"); return; }
                   if (!freeCam) { fcX = px; fcY = py - 40; }
-                  freeCam = true;
+                  freeCam = true; fcIdle = 0;
                   toast("Looking around: move to pan · OK or Back to return");
               }
 
@@ -5097,7 +5131,7 @@ jobs:
                       ezChatT -= dt;
                       if (o == null || !a.chatTalking || ezChatT <= 0) { ezChatA = null; ezWait = 1 + rnd.nextFloat(); return; }
                       float sx = (a.x + o.x) / 2, sy = (a.y + o.y) / 2 + 36;
-                      for (AppPeng q : apps) if ((q.joinOf == a || q.joinOf == o) && q.joinSlot == 1) sy += 30;
+                      for (AppPeng q : apps) if ((q.joinOf == a || q.joinOf == o) && q.joinSlot == 1) sy += 46;
                       float dx = sx - ezX, dy = sy - ezY, d = (float) Math.sqrt(dx * dx + dy * dy);
                       if (d > 3) { ezStep(dx / d, dy / d, Math.min(d, 90 * dt), false); return; }
                       AppPeng talker = a.speaking ? a : o.speaking ? o : null;
@@ -5226,6 +5260,8 @@ jobs:
                           npcEmote(a, E_PAT, 1.6f, 0);
                           ezPatPeng = a;
                           float side = ezX < a.x ? -1 : 1;
+                          if (blockedSpot(a.x + side * 46, a.y + 3, 2) && !blockedSpot(a.x - side * 46, a.y + 3, 2)) side = -side;
+                          a.facing = side < 0 ? LEFT : RIGHT;
                           ezPatX = a.x + side * 46; ezPatY = a.y + 3;
                           ezHappyT = 1.8f;
                           ezWait = 2.5f;
@@ -5283,9 +5319,13 @@ jobs:
                           if (rnd.nextFloat() < 0.35f && a.emote == E_NONE && o.emote == E_NONE) {
                               // they both stop, look down, and give him a few pats on the head
                               float mx = (a.x + o.x) / 2, my = (a.y + o.y) / 2;
-                              a.facing = RIGHT; o.facing = LEFT;
-                              npcEmote(a, E_PAT, 1.6f, 0);
-                              npcEmote(o, E_PAT, 1.6f, 0.15f);
+                              AppPeng lp = a.x <= o.x ? a : o, rp = lp == a ? o : a;
+                              lp.facing = RIGHT; rp.facing = LEFT;
+                              npcEmote(a, E_PAT, 1.6f, 0.25f);
+                              npcEmote(o, E_PAT, 1.6f, 0.4f);
+                              // shuffle apart a little first, so he fits between them
+                              lp.glideX = mx - 46; lp.glideY = lp.y; lp.glideT = 0.5f;
+                              rp.glideX = mx + 46; rp.glideY = rp.y; rp.glideT = 0.5f;
                               ezPatPeng = a; ezPatPeng2 = o;
                               ezPatX = mx; ezPatY = my + 3;
                               ezHappyT = 1.9f;
@@ -5440,15 +5480,25 @@ jobs:
                       path.moveTo(6, -19); path.lineTo(9, -27); path.lineTo(13, -20); path.close();
                       path.moveTo(13, -20); path.lineTo(18, -27); path.lineTo(20, -17); path.close();
                       c.drawPath(path, p);
-                      p.setStyle(Paint.Style.STROKE);
-                      p.setStrokeWidth(1.6f);
-                      p.setColor(0xfff2f2f2);
-                      c.drawLine(9, -13, 13, -13, p);
-                      c.drawLine(15, -13, 19, -13, p);
-                      p.setStyle(Paint.Style.FILL);
+                      if (ezCurlAwake && !blink) {
+                          // curled up but awake: eyes open, watching the room
+                          p.setColor(0xffffffff);
+                          c.drawCircle(11, -13, 3.3f, p);
+                          c.drawCircle(17.2f, -13, 3.3f, p);
+                          p.setColor(0xff111111);
+                          c.drawCircle(11.8f, -12.6f, 1.5f, p);
+                          c.drawCircle(18f, -13.2f, 1.5f, p);
+                      } else {
+                          p.setStyle(Paint.Style.STROKE);
+                          p.setStrokeWidth(1.6f);
+                          p.setColor(0xfff2f2f2);
+                          c.drawLine(9, -13, 13, -13, p);
+                          c.drawLine(15, -13, 19, -13, p);
+                          p.setStyle(Paint.Style.FILL);
+                      }
                       if (season == SEASON_XMAS) ezLights(c, true);
                       c.restore();
-                      if (rnd.nextFloat() < 0.012f) spawnZ(x + 10, y - 30);
+                      if (!ezCurlAwake && rnd.nextFloat() < 0.012f) spawnZ(x + 10, y - 30);
                       return;
                   }
                   c.translate(0, -bob);
@@ -5737,6 +5787,12 @@ jobs:
                   listItems.add(new Item("Sound effects", soundOn ? "On" : "Off", null, () -> {
                       soundOn = !soundOn;
                       prefs.edit().putBoolean("sound", soundOn).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
+                  listItems.add(new Item("Sound effects volume", SFX_LEVELS[sfxLevel] + "%", null, () -> {
+                      sfxLevel = (sfxLevel + 1) % SFX_LEVELS.length;
+                      prefs.edit().putInt("sfxvol", sfxLevel).apply();
                       play(S_TOGGLE, 0.5f, 1f);
                       refreshSettings();
                   }));
@@ -6175,6 +6231,7 @@ jobs:
                       if (Math.abs(cdx) < 200 && Math.abs(cdy) < 200 && (cdx != 0 || cdy != 0)) {
                           for (int i = 0; i < flX.length; i++) { flX[i] -= cdx; flY[i] -= cdy; }
                           for (int i = 0; i < stX.length; i++) { stX[i] -= cdx; stY[i] -= cdy; }
+                          for (int i = 0; i < drX.length; i++) { drX[i] -= cdx; drY[i] -= cdy; }
                       }
                   }
                   lastCamX = camX;
@@ -7235,26 +7292,27 @@ jobs:
                   c.drawRect(oL, oTop, oR, oTop + 120, w);           // a touch darker up high, away from the fire
                   w.setShader(null);
                   // the opening up into the chimney flue: a dark hole in the ceiling with a lit front lip
-                  float tcx = 640, tcy = 298, fw = 88, bw2 = 66, fy = tcy + 24, by2 = tcy - 22;
+                  // (wide edge at the top/back, narrower lit edge at the bottom/front, like looking up into it)
+                  float tcx = 640, tcy = 296, tw = 145, bw = 110, ty2 = tcy - 22, by3 = tcy + 22;
                   Path flue = new Path();
-                  flue.moveTo(tcx - bw2, by2); flue.lineTo(tcx + bw2, by2); flue.lineTo(tcx + fw, fy); flue.lineTo(tcx - fw, fy); flue.close();
-                  w.setShader(new RadialGradient(tcx, tcy - 4, fw, new int[]{0xff000000, 0xff070403, 0xff1c120d}, new float[]{0, 0.7f, 1}, Shader.TileMode.CLAMP));
+                  flue.moveTo(tcx - tw, ty2); flue.lineTo(tcx + tw, ty2); flue.lineTo(tcx + bw, by3); flue.lineTo(tcx - bw, by3); flue.close();
+                  w.setShader(new RadialGradient(tcx, tcy - 4, tw, new int[]{0xff000000, 0xff070403, 0xff1c120d}, new float[]{0, 0.7f, 1}, Shader.TileMode.CLAMP));
                   c.drawPath(flue, w);
                   w.setShader(null);
                   // the flue's walls disappearing up into the dark
                   w.setStyle(Paint.Style.STROKE);
                   w.setStrokeWidth(1.5f);
                   w.setColor(0x302a1c14);
-                  c.drawLine(tcx - fw * 0.75f, fy - 2, tcx - bw2 * 0.6f, by2 + 4, w);
-                  c.drawLine(tcx + fw * 0.75f, fy - 2, tcx + bw2 * 0.6f, by2 + 4, w);
+                  c.drawLine(tcx - bw * 0.8f, by3 - 2, tcx - tw * 0.55f, ty2 + 4, w);
+                  c.drawLine(tcx + bw * 0.8f, by3 - 2, tcx + tw * 0.55f, ty2 + 4, w);
                   // lit front lip, shadowed back and sides
                   w.setStrokeWidth(3);
                   w.setColor(0xff1a110c);
-                  c.drawLine(tcx - bw2, by2, tcx + bw2, by2, w);
-                  c.drawLine(tcx - bw2, by2, tcx - fw, fy, w);
-                  c.drawLine(tcx + bw2, by2, tcx + fw, fy, w);
+                  c.drawLine(tcx - tw, ty2, tcx + tw, ty2, w);
+                  c.drawLine(tcx - tw, ty2, tcx - bw, by3, w);
+                  c.drawLine(tcx + tw, ty2, tcx + bw, by3, w);
                   w.setColor(0xff8a5a3c);
-                  c.drawLine(tcx - fw, fy, tcx + fw, fy, w);
+                  c.drawLine(tcx - bw, by3, tcx + bw, by3, w);
                   w.setStyle(Paint.Style.FILL);
                   c.restore();
                   // stone edge around the opening
@@ -7468,7 +7526,9 @@ jobs:
                       boolean onBed = Math.abs(fxX - FX_BED) < 8 && (fxState == 0 || fxState == 1) && fxHopT <= 0 && fxOnHearth();
                       if (fxState == 4) drawEzioSprawl(c, fxX, fxY, 2.64f, fxFacing, ezPhase, ezBlinkT > 0 || (ezHappyT > 0 && ezWhipT <= 0), season);
                       else {
-                          drawEzio(c, fxX, onBed ? FX_BED_Y - 14 : fxY, 2.64f, fxFacing, fxState == 2 || fxHopT > 0, fxState == 1, ezPhase, ezBlinkT > 0 || (ezHappyT > 0 && ezWhipT <= 0), season);
+                          ezCurlAwake = onBed && fxState == 0;
+                          drawEzio(c, fxX, onBed ? FX_BED_Y - 14 : fxY, 2.64f, fxFacing, fxState == 2 || fxHopT > 0, onBed, ezPhase, ezBlinkT > 0 || (ezHappyT > 0 && ezWhipT <= 0), season);
+                          ezCurlAwake = false;
                           // something in his mouth on a sprint
                           if (fxCarry > 0 && fxState == 2 && !fxPlan.isEmpty() && fxPlan.get(0)[2] >= SPRINT) drawCarried(c, fxX, fxY, 2.64f, fxFacing, fxCarry);
                       }
