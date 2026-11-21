@@ -194,6 +194,7 @@ jobs:
           import android.graphics.Canvas;
           import android.graphics.Color;
           import android.graphics.LinearGradient;
+          import android.graphics.LightingColorFilter;
           import android.graphics.Paint;
           import android.graphics.Path;
           import android.graphics.RadialGradient;
@@ -357,6 +358,7 @@ jobs:
                   AppPeng faceAt;                 // copying this penguin's emote: look at it
                   int napSide;                    // which side of the napper to lie down on
                   float stuckT, sx, sy;           // getting nowhere? pick somewhere else
+                  float squeezeT, escX, escY, escT;   // being shoved by things for a while: slip out to a clear spot
                   float progT, bestD = 1e9f;      // walking but not getting any closer? (circling)
                   float joinWalkT;                // how long they've been trying to reach a conversation
                   float speedMul, walkMul = 1;    // their own natural walking pace, and a little variation walk to walk
@@ -566,7 +568,8 @@ jobs:
                       ashRot = new float[24], ashSpin = new float[24], ashLife = new float[24], ashMax = new float[24], ashSize = new float[24], ashSeed = new float[24];
               static final float FSP = 23;     // gap between flame tongues (smaller = narrower fire)
               final float[] lickX = new float[10], lickY = new float[10], lickSize = new float[10], lickLife = new float[10], lickMax = new float[10], lickShape = new float[10];
-              Path fireArch;
+              Path fireArch, fireHole;
+              static final LightingColorFilter BED_DIM = new LightingColorFilter(0x5a5450, 0x0a0503);   // the bed in the firelit dim
               final Map<String, AppPeng> byPkg = new HashMap<>();
               float[] waveX, waveY, wavePh;
               float[] flX, flY, flSpd, flR;
@@ -758,7 +761,7 @@ jobs:
                       float x = e.getX(), y = e.getY();
                       if (tpLastT > 0 && now - tpLastT < 250) {
                           if (!freeCam) { fcX = px; fcY = py - 40; freeCam = true; }
-                          fcIdle = 0;
+                          fcIdle = 0; fcReturn = false;
                           fcX += (x - tpLastX) * 1.2f; fcY += (y - tpLastY) * 1.2f;
                           clampFreeCam();
                       }
@@ -2776,15 +2779,23 @@ jobs:
                   }
 
                   moving = false;
-                  if (freeCam && (scene != SCENE_ISLAND || overlay != OV_NONE)) freeCam = false;
-                  if (freeCam) {
+                  if (freeCam && scene != SCENE_ISLAND) { freeCam = false; fcReturn = false; }
+                  if (freeCam && overlay != OV_NONE) fcReturn = true;
+                  if (freeCam && fcReturn) {
+                      // easing back to your penguin
+                      float gx = Math.max(VW / 2f, Math.min(WW - VW / 2f, px)), gy = Math.max(VH / 2f, Math.min(WH - VH / 2f, py - 40));
+                      float kr = Math.min(1, dt * 4.5f);
+                      fcX += (gx - fcX) * kr; fcY += (gy - fcY) * kr;
+                      if (Math.abs(gx - fcX) < 2 && Math.abs(gy - fcY) < 2) { freeCam = false; fcReturn = false; }
+                  }
+                  if (freeCam && !fcReturn) {
                       float cdx = (kRight ? 1 : 0) - (kLeft ? 1 : 0) + axX, cdy = (kDown ? 1 : 0) - (kUp ? 1 : 0) + axY;
                       fcX += cdx * 700 * dt; fcY += cdy * 700 * dt;
                       clampFreeCam();
                       // left alone for a while? the view drifts back to you
                       if (Math.abs(cdx) > 0.15f || Math.abs(cdy) > 0.15f) fcIdle = 0;
-                      else { fcIdle += dt; if (fcIdle > 9) { freeCam = false; fcIdle = 0; } }
-                  } else if (!frozen) {
+                      else { fcIdle += dt; if (fcIdle > 9) { fcReturn = true; fcIdle = 0; } }
+                  } else if (!frozen && !(freeCam && overlay != OV_NONE)) {
                       if (pEmote == E_SLIDE) {
                           movePlayer(slideDX, slideDY, 520, dt, true);
                           moving = true;
@@ -3122,6 +3133,17 @@ jobs:
 
                   // Nobody walks through the igloo or the boombox: anyone inside the base gets nudged back out
                   for (AppPeng a : list) {
+                      if (a.escT > 0) {
+                          // slipping out of a tight spot (straight there, nothing in the way can hold them)
+                          a.escT -= dt;
+                          float k = Math.min(1, dt * 5);
+                          float ex = a.escX - a.x, ey = a.escY - a.y;
+                          a.x += ex * k; a.y += ey * k;
+                          if (Math.abs(ex) > 1) a.facing = ex < 0 ? LEFT : RIGHT;
+                          a.tx = a.escX; a.ty = a.escY;
+                          continue;
+                      }
+                      float sqx = a.x, sqy = a.y;
                       float ix = (a.x - IGLOO_X) / 160f, iy = (a.y - (IGLOO_Y - 22)) / 46f;
                       float ie = ix * ix + iy * iy;
                       if (ie < 1) {
@@ -3178,6 +3200,21 @@ jobs:
                           float se = sx2 * sx2 + sy2 * sy2;
                           if (se < 1) { float k = (float) (1 / Math.sqrt(Math.max(se, 0.0001f))); a.x = px + (a.x - px) * k; a.y = py + (a.y - py) * k; }
                       }
+                      // shoved about by things (chairs, the igloo, a sleeper...) for over a second? slip out to the nearest clear spot
+                      if (Math.abs(a.x - sqx) + Math.abs(a.y - sqy) > 0.3f) a.squeezeT += dt;
+                      else a.squeezeT = Math.max(0, a.squeezeT - dt * 2);
+                      if (a.squeezeT > 1.2f) {
+                          a.squeezeT = 0;
+                          float[] spot = clearSpotNear(a, list);
+                          if (spot != null) {
+                              if (a.chatWith != null) endChat(a);
+                              if (a.joinOf != null) leaveGroup(a);
+                              if (a.emote != E_NONE && a.emote != E_NAP) { a.emote = E_NONE; a.faceAt = null; }
+                              a.escX = spot[0]; a.escY = spot[1]; a.escT = 0.9f;
+                              a.hx = spot[0]; a.hy = spot[1];
+                              a.wait = 1 + rnd.nextFloat() * 2;
+                          }
+                      }
                       // getting nowhere for a couple of seconds while trying to walk? pick somewhere else
                       if (a.moving) {
                           a.stuckT += dt;
@@ -3214,10 +3251,15 @@ jobs:
                           AppPeng b = list.get(j);
                           float dx = b.x - a.x, dy = (b.y - a.y) * 1.5f;
                           float d2 = dx * dx + dy * dy;
-                          if (d2 >= 38 * 38 || together(a, b)) continue;
+                          // strangers keep a body's width apart; penguins in the same conversation still don't stand inside each other
+                          boolean tog = together(a, b);
+                          boolean chatty = tog && a.emote != E_HUG && b.emote != E_HUG && !a.hugWalk && !b.hugWalk
+                                  && a.emote != E_NAP && b.emote != E_NAP && a.ev == null && b.ev == null;
+                          float room = tog ? (chatty ? 54 : 0) : 50;
+                          if (d2 >= room * room) continue;
                           float d = (float) Math.sqrt(Math.max(d2, 0.01f));
                           if (d < 0.5f) { dx = rnd.nextFloat() - 0.5f; dy = 0.3f; d = 0.6f; }
-                          float push = (38 - d) * Math.min(1, dt * 1.5f) * 0.5f;
+                          float push = (room - d) * Math.min(1, dt * 1.5f) * 0.5f;
                           boolean aFixed = a.chatWith != null || a.joinOf != null || a.emote == E_NAP;
                           boolean bFixed = b.chatWith != null || b.joinOf != null || b.emote == E_NAP;
                           float ka = aFixed && !bFixed ? 0 : bFixed && !aFixed ? 2 : 1;
@@ -3949,6 +3991,26 @@ jobs:
               }
 
               /** A random spot nearby that's clear of anything solid. */
+              /** The nearest spot round a penguin that's clear of objects, other penguins and a napping you. */
+              float[] clearSpotNear(AppPeng a, List<AppPeng> list) {
+                  for (float r = 40; r <= 200; r += 20) {
+                      for (int i = 0; i < 16; i++) {
+                          double ang = Math.PI * 2 * i / 16 + r * 0.01;
+                          float x = a.x + (float) Math.cos(ang) * r, y = a.y + (float) Math.sin(ang) * r * 0.6f;
+                          float ex = (x - CX) / (RX - 60), ey = (y - CY) / (RY - 60);
+                          if (ex * ex + ey * ey > 1) continue;
+                          if (blockedSpot(x, y, 10)) continue;
+                          if (pEmote == E_NAP) { float sx = (x - px) / 70f, sy = (y - py) / 40f; if (sx * sx + sy * sy < 1) continue; }
+                          if (dist2(x, y, px, py) < 40 * 40) continue;
+                          boolean crowded = false;
+                          for (AppPeng o : list) if (o != a && dist2(x, y, o.x, o.y) < 50 * 50) { crowded = true; break; }
+                          if (crowded) continue;
+                          return new float[]{x, y};
+                      }
+                  }
+                  return null;
+              }
+
               void freshTarget(AppPeng a, float range) {
                   for (int tries = 0; tries < 12; tries++) {
                       float tx = a.x + (rnd.nextFloat() - 0.5f) * range, ty = a.y + (rnd.nextFloat() - 0.5f) * range * 0.6f;
@@ -4052,7 +4114,7 @@ jobs:
                   // ...and not inside the igloo
                   float mix = (mx - IGLOO_X) / 190f, miy = (my - (IGLOO_Y - 22)) / 70f;
                   if (mix * mix + miy * miy < 1) my = my < IGLOO_Y - 22 ? IGLOO_Y - 100 : IGLOO_Y + 60;
-                  leftOne.tx = mx - 30; rightOne.tx = mx + 30;
+                  leftOne.tx = mx - 36; rightOne.tx = mx + 36;
                   leftOne.ty = rightOne.ty = my;
                   a.chatWith = o; o.chatWith = a;
                   a.chatTalking = o.chatTalking = false;
@@ -4603,7 +4665,7 @@ jobs:
                           || code == KeyEvent.KEYCODE_BUTTON_START;
                   idleT = 0;
                   afkT = 0;
-                  if (freeCam && (ok || back || menu) && !repeat) { freeCam = false; fcIdle = 0; play(S_TICK, 0.3f, 1f); if (!menu) return; }
+                  if (freeCam && !fcReturn && (ok || back || menu) && !repeat) { fcReturn = true; fcIdle = 0; play(S_TICK, 0.3f, 1f); if (!menu) return; }
                   if (pEmote == E_NAP || pEmote == E_SIT || pEmote == E_LOOK) {
                       if (overlay == OV_NONE) pEmote = E_NONE;
                   }
@@ -4770,13 +4832,14 @@ jobs:
               // free camera: look around the island without moving your penguin
               volatile boolean freeCam;
               volatile float fcX, fcY, fcIdle;
+              volatile boolean fcReturn;           // gliding back to your penguin
               float tpLastX, tpLastY;
               long tpLastT;
 
               void startFreeCam() {
                   if (scene != SCENE_ISLAND) { toast("Look around works out on the island"); return; }
                   if (!freeCam) { fcX = px; fcY = py - 40; }
-                  freeCam = true; fcIdle = 0;
+                  freeCam = true; fcIdle = 0; fcReturn = false;
                   toast("Looking around: move to pan · OK or Back to return");
               }
 
@@ -7520,8 +7583,37 @@ jobs:
                       drawPumpkin(c, VW - 230, 108, 1);
                   }
 
-                  // Ezio's bed on the hearth bar, out past the stone front, and Ezio doing his thing
+                  // Ambience: the room sits in the dark and the fire lights it. Everything but the fireplace opening is
+                  // dimmed, the corners most of all, with the fire's orange glow spilling out over the stone near it.
+                  {
+                      if (fireHole == null) {
+                          fireHole = new Path();
+                          fireHole.moveTo(320, 400);
+                          rf.set(320, 260, 960, 540);
+                          fireHole.arcTo(rf, 180, 180, false);
+                          fireHole.lineTo(960, FX_HEARTH_TOP);
+                          fireHole.lineTo(320, FX_HEARTH_TOP);
+                          fireHole.close();
+                      }
+                      c.save();
+                      c.clipOutPath(fireHole);
+                      Paint amb = new Paint();
+                      int flat = Math.max(0, Math.min(255, (int) (140 + flick * 10)));
+                      amb.setColor((flat << 24) | 0x0a0603);
+                      c.drawRect(0, 0, VW, VH, amb);
+                      amb.setColor(0xff000000);
+                      amb.setShader(new RadialGradient(640, 500, 860, new int[]{0x00000000, 0x00000000, 0xb0000000}, new float[]{0, 0.38f, 1}, Shader.TileMode.CLAMP));
+                      c.drawRect(0, 0, VW, VH, amb);
+                      int ga = Math.max(0, Math.min(255, (int) (0x70 * Math.max(0.6f, Math.min(1f, glow)) + flick * 8)));
+                      amb.setShader(new RadialGradient(640, 560, 500, new int[]{(ga << 24) | 0xff8a3a, ((ga / 2) << 24) | 0xff7a2a, 0x00ff6a1a}, new float[]{0, 0.45f, 1}, Shader.TileMode.CLAMP));
+                      c.drawRect(0, 0, VW, VH, amb);
+                      c.restore();
+                  }
+
+                  // Ezio's bed on the hearth bar, out past the stone front, and Ezio doing his thing (the bed's in the dim too)
+                  p.setColorFilter(BED_DIM);
                   drawPetBed(c, FX_BED, FX_BED_Y, 2.42f, false);
+                  p.setColorFilter(null);
                   if (ezScene == SCENE_IGLOO) {
                       boolean onBed = Math.abs(fxX - FX_BED) < 8 && (fxState == 0 || fxState == 1) && fxHopT <= 0 && fxOnHearth();
                       if (fxState == 4) drawEzioSprawl(c, fxX, fxY, 2.64f, fxFacing, ezPhase, ezBlinkT > 0 || (ezHappyT > 0 && ezWhipT <= 0), season);
@@ -7532,12 +7624,9 @@ jobs:
                           // something in his mouth on a sprint
                           if (fxCarry > 0 && fxState == 2 && !fxPlan.isEmpty() && fxPlan.get(0)[2] >= SPRINT) drawCarried(c, fxX, fxY, 2.64f, fxFacing, fxCarry);
                       }
-                      if (onBed) drawPetBed(c, FX_BED, FX_BED_Y, 2.42f, true);
+                      if (onBed) { p.setColorFilter(BED_DIM); drawPetBed(c, FX_BED, FX_BED_Y, 2.42f, true); p.setColorFilter(null); }
                   }
 
-                  // overall flicker on the room
-                  int dim = (int) (40 + flick * 14);
-                  c.drawColor(Math.max(0, dim) << 24);
 
                   if (fireHintT < 5) {
                       int a = (int) (255 * Math.min(1, (5 - fireHintT) / 1.5f));
