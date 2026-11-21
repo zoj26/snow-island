@@ -191,6 +191,7 @@ jobs:
           import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
           import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
           import android.graphics.Canvas;
           import android.graphics.Color;
           import android.graphics.LinearGradient;
@@ -314,9 +315,9 @@ jobs:
               static final String[] CHAT_BITS = {"…", "♪", "♥", "?", "!", "★", "☺", "❄", "ha ha", "!!", "hm?", "♫", "ooh", "…!"};
               static final int[] LIGHT_COLS = {0xffe53935, 0xff43a047, 0xfffdd835, 0xff1e88e5, 0xffff80ab, 0xfffb8c00};
 
-              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "🐧", "📻", "🐈", "📯", "🙈", "⚙️", "🎵", "👀"};
-              static final int WN = 12, W_MUSIC = 10, W_REMOTE = 5, W_EZIO = 6, W_WHISTLE = 7;
-              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "Slide", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music", "Look around"};
+              static final String[] WHEEL_ICONS = {"👋", "🕺", "🤗", "❄️", "📻", "🐈", "📯", "🙈", "⚙️", "🎵", "👀"};
+              static final int WN = 11, W_MUSIC = 9, W_REMOTE = 4, W_EZIO = 5, W_WHISTLE = 6;
+              static final String[] WHEEL_NAMES = {"Wave", "Dance", "Hug", "Snowball", "CD remote", "Ezio", "Whistle", "Apps", "Settings", "Music", "Look around"};
 
               /** One penguin leaves a conversation to go and pet Ezio; the rest pause and react. */
               static class PetEvent {
@@ -369,6 +370,7 @@ jobs:
                   AppPeng joinOf;      // joined someone else's conversation
                   int joinSlot;
                   float glideX, glideY, glideT;   // a short sideways shuffle while emoting
+                  float lx, ly, vx, vy;           // last position and smoothed speed (for which way the sprite faces)
                   float joinSpeakT;
                   float blinkT, nextBlink = 2f;
                   boolean placed;
@@ -619,6 +621,8 @@ jobs:
                   weatherFx = prefs.getBoolean("weatherfx", true);
                   seasonPref = prefs.getInt("season", 0);
                   bellyIcons = prefs.getBoolean("belly", false);
+                  useSprites = prefs.getBoolean("sprites", true);
+                  loadSprites();
                   namesAlways = prefs.getBoolean("namesalways", true);
                   namesBelow = prefs.getBoolean("namesbelow", true);
                   autoReturn = prefs.getBoolean("autoreturn", true);
@@ -2795,7 +2799,7 @@ jobs:
                       // left alone for a while? the view drifts back to you
                       if (Math.abs(cdx) > 0.15f || Math.abs(cdy) > 0.15f) fcIdle = 0;
                       else { fcIdle += dt; if (fcIdle > 9) { fcReturn = true; fcIdle = 0; } }
-                  } else if (!frozen && !(freeCam && overlay != OV_NONE)) {
+                  } else if (!frozen && !freeCam) {
                       if (pEmote == E_SLIDE) {
                           movePlayer(slideDX, slideDY, 520, dt, true);
                           moving = true;
@@ -2807,6 +2811,7 @@ jobs:
                               if (len > 1) { dx /= len; dy /= len; }
                               movePlayer(dx, dy, PLAYER_SPEED, dt, false);
                               moving = true;
+                              pDirX = dx; pDirY = dy;
                               if (Math.abs(dx) > Math.abs(dy)) facing = dx < 0 ? LEFT : RIGHT;
                               else facing = dy < 0 ? UP : DOWN;
                           }
@@ -3270,6 +3275,16 @@ jobs:
                           if (!blockedSpot(ax2, ay2, -6)) { a.x = ax2; a.y = ay2; }
                           if (!blockedSpot(bx2, by2, -6)) { b.x = bx2; b.y = by2; }
                       }
+                  }
+
+                  // how each penguin is actually moving (the sprites face that way, diagonals included)
+                  for (AppPeng a : list) {
+                      if (dt > 0) {
+                          float k = Math.min(1, dt * 8);
+                          a.vx += ((a.x - a.lx) / dt - a.vx) * k;
+                          a.vy += ((a.y - a.ly) / dt - a.vy) * k;
+                      }
+                      a.lx = a.x; a.ly = a.y;
                   }
 
                   fightCool = Math.max(0, fightCool - dt);
@@ -4815,17 +4830,16 @@ jobs:
                       case 1: startEmote(E_DANCE, 3.2f); break;
                       case 2: doHug(); break;
                       case 3: doSnowball(); break;
-                      case 4: startEmote(E_SLIDE, 1.1f); break;
-                      case 5:
+                      case 4:
                           if (nowDisc != null) openPlayer();
                           else toast("No disc playing. Walk over to the boombox to put one on.");
                           break;
-                      case 6: toggleEzio(); break;
-                      case 7: blowWhistle(); break;
-                      case 8: openAppsList(null); break;
-                      case 9: openSettings(); break;
-                      case 10: setMusic(!musicOn); break;
-                      case 11: startFreeCam(); break;
+                      case 5: toggleEzio(); break;
+                      case 6: blowWhistle(); break;
+                      case 7: openAppsList(null); break;
+                      case 8: openSettings(); break;
+                      case 9: setMusic(!musicOn); break;
+                      case 10: startFreeCam(); break;
                   }
               }
 
@@ -5859,6 +5873,13 @@ jobs:
                       play(S_TOGGLE, 0.5f, 1f);
                       refreshSettings();
                   }));
+                  listItems.add(new Item("Penguin look", sprAtlas == null ? "Original (no sprite files)" : useSprites ? "Club Penguin" : "Original", null, () -> {
+                      if (sprAtlas == null) { toast("Add the penguin sprite zip to the repo and rebuild to use these"); return; }
+                      useSprites = !useSprites;
+                      prefs.edit().putBoolean("sprites", useSprites).apply();
+                      play(S_TOGGLE, 0.5f, 1f);
+                      refreshSettings();
+                  }));
                   listItems.add(new Item("Penguin icons", bellyIcons ? "On belly" : "Above head", null, () -> {
                       bellyIcons = !bellyIcons;
                       prefs.edit().putBoolean("belly", bellyIcons).apply();
@@ -6373,6 +6394,7 @@ jobs:
                           AppPeng a = (AppPeng) o;
                           if (a.x < camX - 80 || a.x > camX + VW + 80 || a.y < camY - 40 || a.y > camY + VH + 160) continue;
                           int e = a.emoteDelay > 0 ? E_NONE : a.emote;
+                          sprDX = a.vx; sprDY = a.vy;
                           drawPenguin(c, a.x, a.y, 1f, a.scarf, a.facing, a.phase, a.moving, false,
                                   e, a.emoteT, a.blinkT > 0 || e == E_NAP, xmas, a.hitT,
                                   bellyIcons ? a.bodyCol : PENGUIN_BLACK, bellyIcons ? a.icon : null,
@@ -6458,6 +6480,7 @@ jobs:
                   int f = facing;
                   if (pEmote == E_LOOK) f = ((int) (pEmoteT / 0.55f)) % 3 == 1 ? LEFT : ((int) (pEmoteT / 0.55f)) % 3 == 2 ? RIGHT : DOWN;
                   if (pEmote == E_DANCE) f = ((int) (pEmoteT / 0.2f)) % 4;
+                  sprDX = moving ? pDirX * 100 : 0; sprDY = moving ? pDirY * 100 : 0;
                   drawPenguin(c, px, py - hop, 1.12f, PLAYER_SCARF, f, walkPhase, moving, true,
                           pEmote, pEmoteT, pBlinkT > 0 || pEmote == E_NAP, false, pHitT, PENGUIN_BLACK, null, false);
                   if (pHasBall && pEmote != E_THROW) {
@@ -6668,9 +6691,145 @@ jobs:
 
               // ================================================================== drawing: penguins
 
+              // ---------------- Club Penguin sprites (from the zip in the repo, packed into assets/sprites by the build) ----------------
+              Bitmap sprAtlas;
+              final HashMap<String, float[]> sprIdx = new HashMap<>();
+              final HashMap<Integer, LightingColorFilter> sprTints = new HashMap<>();
+              final Paint sprPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+              final Rect sprSrc = new Rect();
+              final RectF sprDst = new RectF();
+              boolean useSprites = true;
+              float sprDX, sprDY, pDirX, pDirY = 1;
+              static final float SPR_DRAW = 72f / 120f;           // atlas pictures are stored a bit bigger than they're drawn
+              static final int PLAYER_TINT = 0xff34343e;          // you: a black penguin
+
+              void loadSprites() {
+                  try {
+                      java.io.InputStream in = getAssets().open("sprites/index.txt");
+                      java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(in));
+                      String line;
+                      while ((line = r.readLine()) != null) {
+                          String[] t = line.trim().split(" ");
+                          if (t.length < 7) continue;
+                          sprIdx.put(t[0], new float[]{Float.parseFloat(t[1]), Float.parseFloat(t[2]), Float.parseFloat(t[3]),
+                                  Float.parseFloat(t[4]), Float.parseFloat(t[5]), Float.parseFloat(t[6])});
+                      }
+                      r.close();
+                      java.io.InputStream ai = getAssets().open("sprites/atlas.png");
+                      sprAtlas = BitmapFactory.decodeStream(ai);
+                      ai.close();
+                  } catch (Exception e) {
+                      sprAtlas = null;      // no sprite files in this build: the original penguins it is
+                  }
+              }
+
+              int sprFrames(String key) {
+                  int n = 0;
+                  while (sprIdx.containsKey(key + "_" + n + "_c")) n++;
+                  return n;
+              }
+
+              /** Draws one sprite frame (tinted colour layer, then belly/outline layer) with its feet at (x, y). */
+              void drawSprFrame(Canvas c, String key, int frame, float x, float y, float s, int tint, boolean mirror) {
+                  float f = s * SPR_DRAW;
+                  if (mirror) { c.save(); c.scale(-1, 1, x, y); }
+                  for (int layer = 0; layer < 2; layer++) {
+                      float[] e = sprIdx.get(key + "_" + frame + (layer == 0 ? "_c" : "_o"));
+                      if (e == null) continue;
+                      sprSrc.set((int) e[0], (int) e[1], (int) (e[0] + e[2]), (int) (e[1] + e[3]));
+                      sprDst.set(x + e[4] * f, y + e[5] * f, x + (e[4] + e[2]) * f, y + (e[5] + e[3]) * f);
+                      if (layer == 0) {
+                          LightingColorFilter cf = sprTints.get(tint);
+                          if (cf == null) { cf = new LightingColorFilter(tint & 0xffffff, 0); sprTints.put(tint, cf); }
+                          sprPaint.setColorFilter(cf);
+                      } else sprPaint.setColorFilter(null);
+                      c.drawBitmap(sprAtlas, sprSrc, sprDst, sprPaint);
+                  }
+                  sprPaint.setColorFilter(null);
+                  if (mirror) c.restore();
+              }
+
+              /** A penguin drawn with the sprites. Returns false if a frame is missing (then the drawn penguin is used). */
+              boolean drawSpritePenguin(Canvas c, float x, float y, float s, int face, float phase, boolean walking,
+                                        int emote, float et, int tint, Bitmap bellyIcon) {
+                  // which way: 8 directions while moving, otherwise the 4-way facing
+                  int dir;
+                  boolean mir;
+                  float sp = Math.abs(sprDX) + Math.abs(sprDY);
+                  if (walking && emote == E_NONE && sp > 8) {
+                      double ang = Math.toDegrees(Math.atan2(sprDY, sprDX));
+                      int sec = (int) Math.round(ang / 45.0);     // 0 right, 1 down-right, 2 down, 3 down-left, 4/-4 left, -3 up-left, -2 up, -1 up-right
+                      switch (sec) {
+                          case 0: dir = 3; mir = true; break;
+                          case 1: dir = 2; mir = true; break;
+                          case 2: dir = 1; mir = false; break;
+                          case 3: dir = 2; mir = false; break;
+                          case -1: dir = 4; mir = true; break;
+                          case -2: dir = 5; mir = false; break;
+                          case -3: dir = 4; mir = false; break;
+                          default: dir = 3; mir = false; break;
+                      }
+                  } else {
+                      dir = face == DOWN ? 1 : face == UP ? 5 : 3;
+                      mir = face == RIGHT;
+                  }
+                  String key;
+                  int frame = 0;
+                  float lift = 0, shake = 0, lean = 0;
+                  boolean mirror = mir;
+                  if (emote == E_DANCE) { key = "D"; frame = (int) (et * 12); mirror = false; }
+                  else if (emote == E_THROW) {
+                      boolean up = face == UP;
+                      key = up ? "T2" : "T1";
+                      int n = sprFrames(key);
+                      frame = Math.min(n - 1, 13 + (int) (Math.min(1f, et / 0.45f) * (n - 14)));
+                      mirror = face == LEFT;
+                  }
+                  else if (emote == E_NAP) { key = "N1"; mirror = false; }
+                  else if (emote == E_SIT) { key = "S" + dir; }
+                  else if (walking && emote == E_NONE) {
+                      key = "W" + dir;
+                      int n = sprFrames(key);
+                      int step = (int) Math.floor(phase / (2 * Math.PI) * 8);
+                      frame = n >= 8 ? ((step % 8) + 8) % 8 : (((step / 2) % n) + n) % n;
+                  } else {
+                      key = "I" + dir;
+                      if (emote == E_HOP) lift = (float) Math.abs(Math.sin(et / 0.6f * Math.PI)) * 12;
+                      if (emote == E_FLINCH) shake = (float) Math.sin(et * 60) * 3;
+                      if (emote == E_HUG) lean = face == RIGHT ? 7 : -7;
+                      if (emote == E_PAT) lift = (float) Math.abs(Math.sin(et / 1.6f * 3 * Math.PI)) * 3;
+                      if (emote == E_FLAP) lift = (float) Math.abs(Math.sin(et * 11)) * 4;
+                  }
+                  int n = sprFrames(key);
+                  if (n == 0) return false;
+                  frame = ((frame % n) + n) % n;
+                  // shadow on the snow
+                  c.save();
+                  c.translate(x + shake, y);
+                  c.scale(s, s);
+                  p.setColor(0x30000000);
+                  c.drawOval(-27, -6, 27, 6, p);
+                  c.restore();
+                  c.save();
+                  if (lean != 0) c.rotate(lean, x, y);
+                  drawSprFrame(c, key, frame, x + shake, y - lift * s, s, tint, mirror);
+                  c.restore();
+                  // the app's icon on its belly, when that's switched on and the belly is showing
+                  if (bellyIcon != null && (key.startsWith("I1") || key.startsWith("W1") || key.startsWith("S1") || key.startsWith("I2") || key.startsWith("W2"))) {
+                      float isz = 22 * s;
+                      rf.set(x - isz / 2, y - lift * s - 40 * s - isz / 2, x + isz / 2, y - lift * s - 40 * s + isz / 2);
+                      c.drawBitmap(bellyIcon, null, rf, null);
+                  }
+                  return true;
+              }
+
               void drawPenguin(Canvas c, float x, float y, float s, int scarf, int face, float phase, boolean walking,
                                boolean player, int emote, float et, boolean blink, boolean xmasHat, float hitT,
                                int bodyCol, Bitmap bellyIcon, boolean talking) {
+                  if (useSprites && sprAtlas != null) {
+                      int tint = player ? PLAYER_TINT : (bodyCol != PENGUIN_BLACK ? bodyCol : scarf);
+                      if (drawSpritePenguin(c, x, y, s, face, phase * (player ? 0.72f : 1f), walking, emote, et, tint, bellyIcon)) return;
+                  }
                   boolean sitting = emote == E_NAP || emote == E_SIT;
                   float hop = 0;
                   if (emote == E_HOP) hop = (float) Math.abs(Math.sin(et / 0.6f * Math.PI)) * 12;
@@ -6906,7 +7065,7 @@ jobs:
                   if (bellyIcons) {
                       // Name floats over the head like a username in a game (above the Santa hat at Christmas)
                       // (or under their feet, so it doesn't fight with speech bubbles)
-                      float bottom = a.y - (activeSeason() == SEASON_XMAS ? 92 : 74);
+                      float bottom = a.y - (activeSeason() == SEASON_XMAS ? 92 : 74) - (useSprites && sprAtlas != null ? 18 : 0);
                       int body = a.bodyCol & 0xffffff;
                       if (namesBelow) {
                           if (highlight) drawNameTag(c, a.x, a.y + 40, a.label, tagColour ? 0xf0000000 | body : 0xe0263238);
@@ -6918,7 +7077,7 @@ jobs:
                       return;
                   }
                   float s = highlight ? 1.35f : 1f;
-                  float cx = a.x, cy = a.y - 86 + bob - (highlight ? 8 : 0);
+                  float cx = a.x, cy = a.y - 86 + bob - (highlight ? 8 : 0) - (useSprites && sprAtlas != null ? 18 : 0);
                   float half = 20 * s;
 
                   p.setColor(0xffffffff);
@@ -8858,6 +9017,206 @@ jobs:
             echo "Using fire.ogg"
           fi
 
+      - name: Pack the Club Penguin sprites (if the penguin zip is in the repo)
+        run: |
+          cat > find_sprites.py <<'PY_EOF'
+          import glob, os, sys, zipfile
+          zips = [z for z in glob.glob("*.zip") if "penguin" in z.lower() and "special" not in z.lower()]
+          if not zips:
+              print("No penguin sprite zip in the repo: using the original drawn penguins")
+              sys.exit(0)
+          os.makedirs("sprite_src", exist_ok=True)
+          zipfile.ZipFile(zips[0]).extractall("sprite_src")
+          for root, dirs, files in os.walk("sprite_src"):
+              if "Walk (1)" in dirs:
+                  open("sprite_root.txt", "w").write(root)
+                  break
+          PY_EOF
+          cat > sprites.py <<'PY_EOF'
+          #!/usr/bin/env python3
+          """Turn the Club Penguin "Playable Characters - Penguin" zip folders into one sprite atlas for Snow Island.
+
+          Usage: sprites.py <folder that holds "Walk (1)", "Idle (1)" ...> <output folder>
+          Writes atlas.png and index.txt. Each frame becomes two pictures: the colour layer as grey (tinted per
+          penguin in the app) and everything else (belly + outlines/feet/beak/eyes) on top.
+          index.txt lines: key x y w h ox oy   (ox, oy: where the picture's top-left sits relative to the feet)
+          """
+          import os, sys, glob
+          import numpy as np
+          from PIL import Image
+
+          SRC, OUT = sys.argv[1], sys.argv[2]
+          STORE_H = 120.0          # standing penguin height in the atlas (pixels)
+          BASE_LUM = 0x2f * 0.3 + 0x4a * 0.59 + 0xad * 0.11   # the pack's blue, which maps to "full colour"
+
+          # body layer offset relative to the colour layer, worked out once by lining the layers up
+          BODY = {"Dance": (-1, -14), "Idle (1)": (-7, 47), "Idle (2)": (30, 2), "Idle (3)": (34, 0), "Idle (4)": (-1, 9),
+                  "Idle (5)": (-1, 138), "Sit (1)": (-12, 34), "Sit (2)": (15, -5), "Sit (3)": (1, 31), "Sit (4)": (36, 0),
+                  "Sit (5)": (0, 138), "Throw (1)": (-7, -26), "Throw (2)": (-2, 9), "Walk (1)": (2, 32), "Walk (2)": (0, 45),
+                  "Walk (3)": (0, 31), "Walk (4)": (0, 8), "Walk (5)": (0, -3), "Wave": (1, -42)}
+
+
+          def files(d, layer):
+              p = os.path.join(SRC, d, layer)
+              if os.path.isdir(p):
+                  return sorted(glob.glob(p + "/*.png"), key=lambda f: int(os.path.basename(f)[:-4]))
+              if os.path.exists(p + ".png"):
+                  return [p + ".png"]
+              return []
+
+
+          def load(f):
+              return Image.open(f).convert("RGBA")
+
+
+          def frame_layers(d, i):
+              """(grey colour layer, overlay) for frame i of folder d, on a shared canvas."""
+              C, Bo, Be = files(d, "Color"), files(d, "Body"), files(d, "Belly")
+              c = load(C[min(i, len(C) - 1)])
+              b = load(Bo[min(i, len(Bo) - 1)])
+              e = load(Be[min(i, len(Be) - 1)]) if Be else None
+              pad = 160
+              W = max(c.size[0], b.size[0]) + 2 * pad
+              H = max(c.size[1], b.size[1]) + 2 * pad
+              a = np.asarray(c).astype(np.float32)
+              lum = (a[:, :, 0] * 0.3 + a[:, :, 1] * 0.59 + a[:, :, 2] * 0.11) / BASE_LUM
+              g = np.clip(lum, 0, 1) * 255
+              grey = np.dstack([g, g, g, a[:, :, 3]]).astype(np.uint8)
+              col = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+              col.alpha_composite(Image.fromarray(grey, "RGBA"), (pad, pad))
+              ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+              if e is not None:
+                  bx = (c.size[0] - e.size[0]) // 2
+                  by = (c.size[1] - e.size[1]) // 2
+                  ov.alpha_composite(e, (pad + bx, pad + by))
+              ox, oy = BODY.get(d, (0, 0))
+              ov.alpha_composite(b, (pad + ox, pad + oy))
+              return col, ov
+
+
+          def close_eyes(col, ov):
+              """The napping frame: paint the open eyes out and draw closed ones (little arcs)."""
+              o = np.asarray(ov).copy()
+              alpha = o[:, :, 3]
+              ys, xs = np.nonzero(alpha > 40)
+              top, bot = ys.min(), ys.max()
+              lim = top + int((bot - top) * 0.33)
+              white = (o[:, :, 0] > 225) & (o[:, :, 1] > 225) & (o[:, :, 2] > 225) & (alpha > 200)
+              white[lim:, :] = False
+              wy, wx = np.nonzero(white)
+              if len(wx) == 0:
+                  return ov
+              x0, x1, y0, y1 = wx.min(), wx.max(), wy.min(), wy.max()
+              # everything in the eye box that isn't the orange beak goes (whites and pupils): the colour shows through
+              box = o[y0:y1 + 1, x0:x1 + 1]
+              orange = (box[:, :, 0] > 180) & (box[:, :, 1] > 90) & (box[:, :, 1] < 200) & (box[:, :, 2] < 90)
+              keep = orange | (box[:, :, 3] < 10)
+              box[~keep] = 0
+              o[y0:y1 + 1, x0:x1 + 1] = box
+              out = Image.fromarray(o, "RGBA")
+              from PIL import ImageDraw
+              dr = ImageDraw.Draw(out)
+              # two eyes: split the white area at its middle
+              mid = (x0 + x1) // 2
+              w = max(2, int((y1 - y0) * 0.16))
+              cy = y0 + (y1 - y0) * 0.2
+              for ex0, ex1 in ((x0 + 3, mid - 4), (mid + 4, x1 - 3)):
+                  if ex1 - ex0 < 4:
+                      continue
+                  r = (ex1 - ex0) * 0.3
+                  dr.arc([ex0, cy - r, ex1, cy + r], 15, 165, fill=(25, 25, 35, 255), width=w)
+              return out
+
+
+          # what goes in: (key, [(folder, frame index)...], per-frame feet?)
+          # The walk folders in the pack are muddled: frames 4-7 of each direction sit in the folder one before it.
+          JOBS = []
+          JOBS.append(("W1", [("Walk (1)", i) for i in range(8)], True))
+          JOBS.append(("W2", [("Walk (2)", i) for i in (0, 1, 2, 7)], True))
+          for k in (3, 4, 5):
+              JOBS.append(("W%d" % k, [("Walk (%d)" % k, 0), ("Walk (%d)" % k, 1), ("Walk (%d)" % k, 2)]
+                           + [("Walk (%d)" % (k - 1), i) for i in (3, 4, 5, 6)] + [("Walk (%d)" % k, 7)], True))
+          for k in range(1, 6):
+              JOBS.append(("I%d" % k, [("Idle (%d)" % k, 0)], True))
+              JOBS.append(("S%d" % k, [("Sit (%d)" % k, 0)], True))
+          JOBS.append(("D", [("Dance", i) for i in range(0, len(files("Dance", "Color")), 4)], False))
+          JOBS.append(("T1", [("Throw (1)", i) for i in range(len(files("Throw (1)", "Color")))], False))
+          JOBS.append(("T2", [("Throw (2)", i) for i in range(len(files("Throw (2)", "Color")))], False))
+
+
+          def feet(col, ov):
+              """Feet point of one frame: middle of the lower half of the body, bottom of the penguin."""
+              a = np.asarray(col)[:, :, 3] > 40
+              ys, xs = np.nonzero(a)
+              sel = ys > (ys.min() + ys.max()) / 2
+              return float(xs[sel].mean()), float(Image.alpha_composite(col, ov).getbbox()[3])
+
+
+          # one scale for everything, from the front standing pose
+          c0, o0 = frame_layers("Idle (1)", 0)
+          bb = Image.alpha_composite(c0, o0).getbbox()
+          SCALE = STORE_H / (bb[3] - bb[1])
+
+          tiles = []   # (key, image, ox, oy)
+          for key, parts, per_frame in JOBS:
+              if any(not files(d, "Color") for d, _ in parts):
+                  continue
+              frames = [frame_layers(d, i) for d, i in parts]
+              folder = parts[0][0]
+              sc = SCALE * (2.0 if folder.startswith("Throw") else 1.0)     # the throw pictures in the pack are half size
+              if per_frame:
+                  anchors = [feet(c, o) for c, o in frames]
+              else:
+                  fs = [feet(c, o) for c, o in frames]
+                  ax = float(np.median([f[0] for f in fs]))
+                  ay = float(np.percentile([f[1] for f in fs], 85))
+                  anchors = [(ax, ay)] * len(frames)
+              if key == "S1":
+                  frames.append((frames[0][0], close_eyes(*frames[0])))
+                  anchors.append(anchors[0])
+              for n, (col, ov) in enumerate(frames):
+                  k2 = "N1" if (key == "S1" and n == 1) else key
+                  n2 = 0 if k2 == "N1" else n
+                  ax, ay = anchors[n]
+                  for layer, im in (("c", col), ("o", ov)):
+                      box = im.getbbox()
+                      if box is None:
+                          continue
+                      crop = im.crop(box)
+                      w = max(1, int(round(crop.size[0] * sc)))
+                      h = max(1, int(round(crop.size[1] * sc)))
+                      small = crop.resize((w, h), Image.LANCZOS)
+                      tiles.append(("%s_%d_%s" % (k2, n2, layer), small, (box[0] - ax) * sc, (box[1] - ay) * sc))
+
+          # shelf-pack into one atlas
+          AW = 2048
+          tiles.sort(key=lambda t: -t[1].size[1])
+          x = y = shelf = 0
+          places = []
+          for key, im, ox, oy in tiles:
+              w, h = im.size
+              if x + w + 1 > AW:
+                  x = 0
+                  y += shelf + 1
+                  shelf = 0
+              places.append((key, x, y, w, h, ox, oy, im))
+              x += w + 1
+              shelf = max(shelf, h)
+          AH = y + shelf + 1
+          atlas = Image.new("RGBA", (AW, AH), (0, 0, 0, 0))
+          os.makedirs(OUT, exist_ok=True)
+          with open(os.path.join(OUT, "index.txt"), "w") as f:
+              for key, x, y, w, h, ox, oy, im in places:
+                  atlas.paste(im, (x, y))
+                  f.write("%s %d %d %d %d %.1f %.1f\n" % (key, x, y, w, h, ox, oy))
+          atlas.save(os.path.join(OUT, "atlas.png"), optimize=True)
+          print("sprites: %d pictures, atlas %dx%d" % (len(places), AW, AH))
+          PY_EOF
+          python3 find_sprites.py
+          if [ -f sprite_root.txt ]; then
+            pip install --quiet pillow numpy
+            python3 sprites.py "$(cat sprite_root.txt)" app/src/main/assets/sprites
+          fi
       - name: Make a signing key (first build only)
         run: |
           if [ ! -f signing/snowisland.keystore ]; then
